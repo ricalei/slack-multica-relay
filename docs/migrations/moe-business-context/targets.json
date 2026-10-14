@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "server_url": "https://multica.devops.moego.dev",
+  "workspace_id": "1b6d114a-8407-4ba8-adea-d31209caabe5",
+  "workspace_name": "GRM",
+  "replacement": {
+    "from": "gather-moego-context",
+    "to": "moe-business-context"
+  },
+  "objects": [
+    {
+      "kind": "skill",
+      "id": "c0b414c7-2763-4c58-92c5-d4e7824b44c3",
+      "name": "gather-moego-context",
+      "observed_updated_at": "2026-09-04T02:58:01Z",
+      "changes": [
+        {
+          "field": "name",
+          "before_sha256": "b0fa038888cf95635d7e2b871cf88291a5848f4b9b6addd9abe2c430af0d70f4",
+          "after_sha256": "98fbc943d0ba0c0c07fdf88e442bb44714e89d2899b28dfffd390939b21e7cc2",
+          "occurrences": 1
+        },
+        {
+          "field": "content",
+          "before_sha256": "3868fb1a74aa515717aaa02f0cbf5c25826f78426409f1e64fbf76aebbcdd476",
+          "after_sha256": "17937a8d9d5ca2bd8d304431d78a2277ec8935c95feafc25cc1d8ca34fb13bfc",
+          "occurrences": 1
+        }
+      ]
+    },
+    {
+      "kind": "skill",
+      "id": "699cec98-8c2d-4fff-bd91-9283e393f2a7",
+      "name": "analyze-jira-prd",
+      "observed_updated_at": "2026-09-04T02:57:48Z",
+      "changes": [
+        {
+          "field": "description",
+          "before_sha256": "d1b0e9e97894ac989e0db05e083418bd7dd3ea5ba543c6d295ab44b6dca23bce",
+          "after_sha256": "3f00e3d8bec2447ddc4694fb04586a44181dbd24b2be700bb68e568e4d68f765",
+          "occurrences": 1
+        },
+        {
+          "field": "content",
+          "before_sha256": "5dc2f0677b5bd7ddeae6c1d1f27d9567e286ededbddde268464e97cb240a501d",
+          "after_sha256": "ebde7d55f8d645aca152b9685858c3f2d22dd65153d84d7c84db9ea6ab55efcd",
+          "occurrences": 16
+        }
+      ]
+    },
+    {
+      "kind": "skill",
+      "id": "13c2e8ba-b3c6-42ed-8517-17101da480dc",
+      "name": "moe-opc",
+      "observed_updated_at": "2026-09-04T02:59:39Z",
+      "changes": [
+        {
+          "field": "content",
+          "before_sha256": "26f23dd7162318280d03855b4949f132d08b48745c717685f57c3de67dbc4a48",
+          "after_sha256": "253bb0f32f840e2f05e1c23ed130b668896c83abf371dfb352fff3237008bd8b",
+          "occurrences": 1
+        },
+        {
+          "field": "file:evals/evals.json",
+          "before_sha256": "faa60b467acc55fe5300a6eca8320c96872b106d78281cb0e47e3f078010e2a3",
+          "after_sha256": "2265fd8eeb1db6898eab781ceaefeedbca2f3111e3a8e3bd338ca19c002af1bc",
+          "occurrences": 1
+        },
+        {
+          "field": "file:references/resource-context.md",
+          "before_sha256": "13959501cb9c3d9ea598daf7248059f25e9f1b22cd449b229e10fd8ab58555bc",
+          "after_sha256": "d791d213efc850f6720b83c20042a3aef00a20c2a7b9f2e435e82e711ba45613",
+          "occurrences": 1
+        },
+        {
+          "field": "file:references/stages/technical-design.md",
+          "before_sha256": "c92b7ce1bf1c14d0c43c0fea7246f2e16ddb430b653b6586510d952d06e8d592",
+          "after_sha256": "a956bf38a4fe0b028a0259611a3ec39953b3842f9e4b8fa0e544a65840b7d486",
+          "occurrences": 1
+        }
+      ]
+    },
+    {
+      "kind": "agent",
+      "id": "424ff38a-c928-4346-9b77-f6c704d91236",
+      "name": "Slack Task Router (Codex)",
+      "observed_updated_at": "2026-09-16T09:58:02Z",
+      "changes": [],
+      "verification": {
+        "instructions_sha256": "375f211f8873d448ac4f0325d69e98d2323297b8c9c38bf544b362c5436c5e6a",
+        "runtime_id": "1dfab086-f3d8-46bb-a504-50b08ad158ff",
+        "runtime_bound": true,
+        "reason": "当前 instructions 无旧名称，保持原样；验证新 Skill 可加载。"
+      }
+    },
+    {
+      "kind": "agent",
+      "id": "dae9afb3-720b-4a3b-879c-cd63821bd0b2",
+      "name": "MoeGo Bug Resolver",
+      "observed_updated_at": "2026-09-16T07:23:38Z",
+      "changes": [
+        {
+          "field": "instructions",
+          "before_sha256": "a717611b49acd58c784e03ce1e088af60d9581bb547507c692ffa0d1c45537b0",
+          "after_sha256": "d42ca63d1dc28cce0c2a87e6c4e09d84b5f555c612ecc1c24773ee505f3db029",
+          "occurrences": 1
+        }
+      ]
+    }
+  ]
+}

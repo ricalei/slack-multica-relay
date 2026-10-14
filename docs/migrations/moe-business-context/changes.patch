@@ -1,0 +1,85 @@
+--- before/skill/c0b414c7-2763-4c58-92c5-d4e7824b44c3/name
++++ after/skill/c0b414c7-2763-4c58-92c5-d4e7824b44c3/name
+@@ -1 +1 @@
+-gather-moego-context
+\ No newline at end of file
++moe-business-context
+\ No newline at end of file
+--- before/skill/c0b414c7-2763-4c58-92c5-d4e7824b44c3/content
++++ after/skill/c0b414c7-2763-4c58-92c5-d4e7824b44c3/content
+@@ -2 +2 @@
+-name: gather-moego-context
++name: moe-business-context
+--- before/skill/699cec98-8c2d-4fff-bd91-9283e393f2a7/description
++++ after/skill/699cec98-8c2d-4fff-bd91-9283e393f2a7/description
+@@ -1 +1 @@
+-Use when 用户给出 Jira PRD URL 或 PRD issue key（如 GRM-* / IFRFE-*）并要求分析 PRD、 评估改动点 / 工时、输出技术方案、拆前后端子任务或走完整 PRD 可行性调研流程。 只适用于 PRD / 需求分析；CS-* 仅作为关联上下文读取，不作为主入口。入口为 SKILL.md， 纯方法论编排 jira / gather-moego-context / github-workflow；飞书子文档仅在用户明确要求 并提供或确认创建位置时执行。关键词：分析 PRD、评估改动、技术方案、工时评估、子任务。
+\ No newline at end of file
++Use when 用户给出 Jira PRD URL 或 PRD issue key（如 GRM-* / IFRFE-*）并要求分析 PRD、 评估改动点 / 工时、输出技术方案、拆前后端子任务或走完整 PRD 可行性调研流程。 只适用于 PRD / 需求分析；CS-* 仅作为关联上下文读取，不作为主入口。入口为 SKILL.md， 纯方法论编排 jira / moe-business-context / github-workflow；飞书子文档仅在用户明确要求 并提供或确认创建位置时执行。关键词：分析 PRD、评估改动、技术方案、工时评估、子任务。
+\ No newline at end of file
+--- before/skill/699cec98-8c2d-4fff-bd91-9283e393f2a7/content
++++ after/skill/699cec98-8c2d-4fff-bd91-9283e393f2a7/content
+@@ -7 +7 @@
+-  纯方法论编排 jira / gather-moego-context / github-workflow；飞书子文档仅在用户明确要求
++  纯方法论编排 jira / moe-business-context / github-workflow；飞书子文档仅在用户明确要求
+@@ -15,3 +15,3 @@
+-**必须**搭配 [`gather-moego-context`](../gather-moego-context/SKILL.md) skill 使用。本 skill 的 Phase 2「横向上下文采集」整段委托给 `gather-moego-context` 完成。
+-
+-> 如果加载本 skill 时未发现 `gather-moego-context` 可用，先确认 skill 仓库是否完整加载；不要尝试在本 skill 内部内联实现上下文聚合逻辑——保持职责单一。
++**必须**搭配 [`moe-business-context`](../moe-business-context/SKILL.md) skill 使用。本 skill 的 Phase 2「横向上下文采集」整段委托给 `moe-business-context` 完成。
++
++> 如果加载本 skill 时未发现 `moe-business-context` 可用，先确认 skill 仓库是否完整加载；不要尝试在本 skill 内部内联实现上下文聚合逻辑——保持职责单一。
+@@ -35 +35 @@
+-- 用户给的是 `CS-*` 客服工单主入口 → 用 `gather-moego-context` / debugging 路线；本 skill 只把 CS 工单当作 PRD 的关联上下文
++- 用户给的是 `CS-*` 客服工单主入口 → 用 `moe-business-context` / debugging 路线；本 skill 只把 CS 工单当作 PRD 的关联上下文
+@@ -74,3 +74,3 @@
+-**整段委托给 [`gather-moego-context`](../gather-moego-context/SKILL.md) skill。**
+-
+-调用方式：把 Phase 1 提炼出的关键词 / 关联工单 / 飞书 URL / 附件信息打包传给 `gather-moego-context`，让它按问题类型路由检索（业务流程 / 历史决策 / 字段语义等），产出结构化 brief（来源 + 链接 + 一行结论 + 假设清单）。
++**整段委托给 [`moe-business-context`](../moe-business-context/SKILL.md) skill。**
++
++调用方式：把 Phase 1 提炼出的关键词 / 关联工单 / 飞书 URL / 附件信息打包传给 `moe-business-context`，让它按问题类型路由检索（业务流程 / 历史决策 / 字段语义等），产出结构化 brief（来源 + 链接 + 一行结论 + 假设清单）。
+@@ -92 +92 @@
+-⚠️ **PRD 引用的飞书评估文档必须核对，不要直接采纳**（见 §6 教训 4）。`gather-moego-context` 已经把"证据 vs 假设分离"作为原则，但本 skill 仍然要对每条来自外部文档的声明做 Phase 3 代码核验。
++⚠️ **PRD 引用的飞书评估文档必须核对，不要直接采纳**（见 §6 教训 4）。`moe-business-context` 已经把"证据 vs 假设分离"作为原则，但本 skill 仍然要对每条来自外部文档的声明做 Phase 3 代码核验。
+@@ -562 +562 @@
+-Phase 2 横向上下文采集 → 调用 gather-moego-context skill
++Phase 2 横向上下文采集 → 调用 moe-business-context skill
+@@ -598 +598 @@
+-| [`gather-moego-context`](../gather-moego-context/SKILL.md) | **必填** | Phase 2 整段委托：横向上下文聚合 |
++| [`moe-business-context`](../moe-business-context/SKILL.md) | **必填** | Phase 2 整段委托：横向上下文聚合 |
+@@ -603,3 +603,3 @@
+-### 11.2 间接依赖（通过 `gather-moego-context` 调用）
+-
+-| Skill | 通过 `gather-moego-context` 触发的场景 |
++### 11.2 间接依赖（通过 `moe-business-context` 调用）
++
++| Skill | 通过 `moe-business-context` 触发的场景 |
+@@ -613 +613 @@
+-本 skill 不**直接**调上面这些工具，全部通过 `gather-moego-context` 路由，避免重复实现检索策略。
++本 skill 不**直接**调上面这些工具，全部通过 `moe-business-context` 路由，避免重复实现检索策略。
+--- before/skill/13c2e8ba-b3c6-42ed-8517-17101da480dc/content
++++ after/skill/13c2e8ba-b3c6-42ed-8517-17101da480dc/content
+@@ -88 +88 @@
+-- 产品与技术上下文由 OPC 按动作编排 `$jira`、`$gather-moego-context`、`$github-workflow` 与按需 owner Skill；外部 Skill 提供事实和原子动作，不代跑完整阶段。
++- 产品与技术上下文由 OPC 按动作编排 `$jira`、`$moe-business-context`、`$github-workflow` 与按需 owner Skill；外部 Skill 提供事实和原子动作，不代跑完整阶段。
+--- before/skill/13c2e8ba-b3c6-42ed-8517-17101da480dc/files/evals/evals.json
++++ after/skill/13c2e8ba-b3c6-42ed-8517-17101da480dc/files/evals/evals.json
+@@ -934 +934 @@
+-      "expected_output": "直接编排 Jira 与单仓代码事实，读取内置 Review Readiness 后形成 Implementable；写本地源并回读、回填 Jira requirement 并回读。gather-moego-context、moe-stack、review-swarm、Lark 和 Jira Task 调用数均为 0。",
++      "expected_output": "直接编排 Jira 与单仓代码事实，读取内置 Review Readiness 后形成 Implementable；写本地源并回读、回填 Jira requirement 并回读。moe-business-context、moe-stack、review-swarm、Lark 和 Jira Task 调用数均为 0。",
+--- before/skill/13c2e8ba-b3c6-42ed-8517-17101da480dc/files/references/resource-context.md
++++ after/skill/13c2e8ba-b3c6-42ed-8517-17101da480dc/files/references/resource-context.md
+@@ -25 +25 @@
+-业务术语翻译和跨来源检索优先交给 `$gather-moego-context` 编排。来源冲突时不套用“代码 > Jira > 文档 > 讨论”的通用排序；说明冲突属于哪类事实、各自时间和为何选择当前结论。
++业务术语翻译和跨来源检索优先交给 `$moe-business-context` 编排。来源冲突时不套用“代码 > Jira > 文档 > 讨论”的通用排序；说明冲突属于哪类事实、各自时间和为何选择当前结论。
+--- before/skill/13c2e8ba-b3c6-42ed-8517-17101da480dc/files/references/stages/technical-design.md
++++ after/skill/13c2e8ba-b3c6-42ed-8517-17101da480dc/files/references/stages/technical-design.md
+@@ -14 +14 @@
+-2. 产品语义、用户路径或业务边界仍有缺口时，通过 `$gather-moego-context` 补业务事实。
++2. 产品语义、用户路径或业务边界仍有缺口时，通过 `$moe-business-context` 补业务事实。
+--- before/agent/dae9afb3-720b-4a3b-879c-cd63821bd0b2/instructions
++++ after/agent/dae9afb3-720b-4a3b-879c-cd63821bd0b2/instructions
+@@ -16 +16 @@
+-使用 `moe-router` 按当前目标路由；关联业务证据用 `gather-moego-context`，单一来源足够时直接用对应 Skill。开发用 `moe-development`，Git 与 CI 用 `github-workflow`，PR 说明用 `review-brief`，动态验收与报告用 `moe-acceptance`，Sites 发布用 Sites Skills。用户明确要求向 Slack 发送 PR 评审材料时，按当前 `moe-opc` 与 `review-brief` 的评审发送约定执行。先读取当前适用 Skill，再按其真实合同执行；具体账号、数据、平台、证据、报告模板和资源恢复规则由所属 Skill 维护。
++使用 `moe-router` 按当前目标路由；关联业务证据用 `moe-business-context`，单一来源足够时直接用对应 Skill。开发用 `moe-development`，Git 与 CI 用 `github-workflow`，PR 说明用 `review-brief`，动态验收与报告用 `moe-acceptance`，Sites 发布用 Sites Skills。用户明确要求向 Slack 发送 PR 评审材料时，按当前 `moe-opc` 与 `review-brief` 的评审发送约定执行。先读取当前适用 Skill，再按其真实合同执行；具体账号、数据、平台、证据、报告模板和资源恢复规则由所属 Skill 维护。
