@@ -88,31 +88,11 @@ class RejectionTests(unittest.TestCase):
 
 
 class NotifyStateTests(unittest.TestCase):
-    NOTIFY = {'issue': 'B1', 'kind': 'notify', 'draft': {'ts': '200.1'}}
-
-    def draft(self, *reactions):
-        return {'ts': '200.1', 'author': {'user_id': 'BOT'}, 'reactions': list(reactions)}
-
-    def test_no_draft_record_is_pending_and_unmarked_draft_is_drafted(self):
-        self.assertEqual(board_module.notify_state([], None, REVIEWER), 'pending')
-        others = self.draft({'name': 'outbox_tray', 'users': ['U2']})
-        self.assertEqual(board_module.notify_state([others], self.NOTIFY, REVIEWER), 'drafted')
-
-    def test_reviewer_reaction_on_draft_only(self):
-        root = {'ts': '100.1', 'author': {'user_id': 'BOT'}, 'reactions': [{'name': 'outbox_tray', 'users': [REVIEWER]}]}
-        self.assertEqual(board_module.notify_state([root, self.draft()], self.NOTIFY, REVIEWER), 'drafted')
-        sent = self.draft({'name': 'outbox_tray', 'users': [REVIEWER]})
-        self.assertEqual(board_module.notify_state([root, sent], self.NOTIFY, REVIEWER), 'sent')
-        both = self.draft({'name': 'outbox_tray', 'users': [REVIEWER]}, {'name': 'no_bell', 'users': [REVIEWER]})
-        self.assertEqual(board_module.notify_state([both], self.NOTIFY, REVIEWER), 'skipped')
-
-    def test_reviewer_reply_after_draft_counts(self):
-        before = {'ts': '150.1', 'author': {'user_id': REVIEWER}, 'text_raw': '已回告'}
-        self.assertEqual(board_module.notify_state([before, self.draft()], self.NOTIFY, REVIEWER), 'drafted')
-        other = {'ts': '300.1', 'author': {'user_id': 'U2'}, 'text_raw': '📤 已发'}
-        reply = {'ts': '301.1', 'author': {'user_id': REVIEWER}, 'text_raw': '🔕 客户已流失'}
-        self.assertEqual(board_module.notify_state([self.draft(), other], self.NOTIFY, REVIEWER), 'drafted')
-        self.assertEqual(board_module.notify_state([self.draft(), other, reply], self.NOTIFY, REVIEWER), 'skipped')
+    def test_latest_sent_or_skipped_record_counts_otherwise_pending(self):
+        self.assertEqual(board_module.notify_state(None), 'pending')
+        self.assertEqual(board_module.notify_state({'state': 'drafted'}), 'pending')
+        self.assertEqual(board_module.notify_state({'state': 'sent'}), 'sent')
+        self.assertEqual(board_module.notify_state({'state': 'skipped'}), 'skipped')
 
 
 class BugStateTests(unittest.TestCase):
@@ -204,17 +184,13 @@ class BoardTests(unittest.TestCase):
         self.assertEqual(items['merged'][0][1], '1 天')
         self.assertEqual([entry[0]['identifier'] for entry in items['unrejectable']], ['B2'])
 
-    def test_released_bugs_pending_or_drafted_need_notify_and_stay_out_of_status_ages(self):
+    def test_released_bugs_without_notify_record_need_notify(self):
         released = [pr('merged', release={'tag': 't'})]
         bugs = [{**bug(f'N{index}', '2026-10-13', 'released', released), 'notify': notify}
-                for index, notify in enumerate(('pending', 'drafted', 'sent', 'skipped'))]
+                for index, notify in enumerate(('pending', 'sent', 'skipped'))]
         board = board_module.build_board([], bugs, dt.date(2026, 10, 13), dt.date(2026, 10, 14))
-        self.assertEqual([(entry[0]['identifier'], entry[1]) for entry in board_module.attention(board, NOW)['notify']],
-                         [('N0', None), ('N1', '草稿待发')])
-        slack = board_module.render_slack(board, NOW)
-        self.assertIn('- 已上线待回告 2：[N0](https://m/N0)、[N1](https://m/N1)（草稿待发）', slack)
-        self.assertNotIn('草稿待发', board_module.status_lines(board, NOW)[0])
-
+        self.assertEqual([entry[0]['identifier'] for entry in board_module.attention(board, NOW)['notify']], ['N0'])
+        self.assertIn('- 已上线待回告 1：[N0](https://m/N0)', board_module.render_slack(board, NOW))
 
 if __name__ == '__main__':
     unittest.main()

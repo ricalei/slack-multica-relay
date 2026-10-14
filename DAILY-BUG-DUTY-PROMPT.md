@@ -63,7 +63,7 @@ Multica 任务操作一律用原生 CLI：先看帮助，核对服务、GRM 工�
 
 ## 3. 交付、自动接续与人工审查
 
-指定交付频道是 <交付频道 ID>，审查人为 Winches（Slack <审查人 Slack 用户 ID>；Multica user <审查人 Multica 用户 ID>）。通过 Slack Skill 使用已核对的可用身份，记录真实 actor；身份未知/发送结果不明先回读，不盲目 fallback。仅向该频道发本工作流结果，不代用户联系客户或其它人员。新 Agent 的交付授权独立于其它 Agent。
+指定交付频道是 <交付频道 ID>，审查人为 Winches（Slack <审查人 Slack 用户 ID>；Multica user <审查人 Multica 用户 ID>）。通过 Slack Skill 使用已核对的可用身份，记录真实 actor；身份未知/发送结果不明先回读，不盲目 fallback。仅向该频道发本工作流结果，不代用户联系客户或其它人员；第 4 节经 Winches `确认发布` 的 CS 私信除外。新 Agent 的交付授权独立于其它 Agent。
 
 每个 Bug 复用自己的交付 thread。Slack 和 Multica 的完整交付回复统一使用以下模板，替换全部占位内容，链接必须真实且已核对。Multica 链接指向当前 Bug 任务，不用父批次或下一项代替；问题来源链接指向实际反馈来源，不用 PR 或任务链接代替。Intercom 来源链接使用会话 `sourceUrl`；引用客户消息只用脱敏后的原文，不编造身份、原话或出现频率。
 
@@ -113,23 +113,36 @@ Story 默认最多 2 条，写清用户、场景、操作、预期、实际偏�
 
 最后一项完整交付后将父批次标为 `state=completed`、`outcome=engineering_delivery_completed`、`currentIssueId=null`，父任务保留 in_review；发送一次批次汇总，列出每项 current/total、问题、Multica、PR 与报告链接和实际限制，集中供人工审查，不创建新批次或启用定时。批次 completed 表示固定队列已完成工程交付，不表示人工验收、PR 合并或生产发布。有真人明确跳过的未完成项时，outcome 改为 finished_with_skips，汇总逐项说明缺口，不能宣称全部修复已交付。
 
-人工修改、暂停、取消或跳过仍通过对应 Multica 任务评论提出，核对真实作者、评论 ID、所属任务、交付版本和语义。要求返工时复用该 Bug 的分支、PR 和证据，串行修订、局部复验并更新报告与 deliveryVersion；更新父任务的该项交付记录，不把旧任务再放行一次或打乱已启动的队列。普通讨论不当作改动指令，首行为 `回告` 的评论按第 4 节处理，确认通过仅记录该版本人工审查结果，不再作为下一项启动条件。明确跳过真实受阻项时保存授权评论与未完成范围，按固定顺序推进；跳过不计为完整交付。
+人工修改、暂停、取消或跳过仍通过对应 Multica 任务评论提出，核对真实作者、评论 ID、所属任务、交付版本和语义。要求返工时复用该 Bug 的分支、PR 和证据，串行修订、局部复验并更新报告与 deliveryVersion；更新父任务的该项交付记录，不把旧任务再放行一次或打乱已启动的队列。普通讨论不当作改动指令，首行为 `回告`、`确认发布`、`已回告`、`不回告` 的评论按第 4 节处理，确认通过仅记录该版本人工审查结果，不再作为下一项启动条件。明确跳过真实受阻项时保存授权评论与未完成范围，按固定顺序推进；跳过不计为完整交付。
 
 旧批次若停在 awaiting_confirmation，先回读已交付项的真实版本、完整报告和交付回执：满足新规则就迁移为 delivered 与 pending_human_review 并接续；缺修复、验收或交付证据时补缺口，不凭旧状态放行。acceptedCommentIds 等既有真人确认记录仅作审计保留，不补造新记录。
 
 开工后发现本项需要产品决策时停止修复，只说明排除理由，等待 Winches 明确“跳过”再前进；不生成决策模板、不发产品决策请求。
 
-## 4. 上线回告（只起草）
+## 4. 上线回告
 
-Winches 在已交付 Bug 任务中发表首行为 `回告` 的评论时（核对作者为审查人 Multica 用户），本次运行只为该 Bug 起草上线回告，不是返工、暂停或跳过：不改代码、PR、报告、deliveryVersion、dailyBug/dailyBatch metadata、任务状态或队列，不启动其它任务。第二行起是本次起草要求（如指定 CS、调整语气），只约束草稿内容。回告只由 AI 起草、Winches 审核后自行发送：不私信或 @ 任何人，不编辑删除消息、不加 reaction，不在 Intercom、Canny、Facebook 写入。同一触发评论已有草稿回执时复用，不重复发送。
+Winches（核对作者为审查人 Multica 用户）在已交付 Bug 任务中发表以下首行评论时，本次运行只处理该 Bug 的上线回告，不是返工、暂停或跳过：不改代码、PR、报告、deliveryVersion、dailyBug/dailyBatch metadata、任务状态或队列，不启动其它任务。其他作者或其它首行的评论不按本节处理。每次运行结束都在触发评论下回复一句结论和相关链接。
 
-1. 核对上线：按看板同样方式，对 `/Users/moego-winches/Desktop/Company/person/slack-multica-relay` 执行 `git fetch origin main`，`git show origin/main:scripts/duty-board.py` 导出到临时目录，以 `--project 724dce94-a8b9-44e7-8390-9c3cbdac7bc0 --ledger-issue GRM-664 --start 2026-10-12 --reviewer <审查人 Slack 用户 ID> --output-dir <临时目录>` 运行，读取 `board.json` 中本 Bug。`state` 不是 `released` 时在触发评论下回复实际状态并结束，不起草。上线版本取各 PR 的 `release.tag`，上线日期取其中最晚的 `release.at`（Asia/Shanghai）。
-2. 读取材料：本任务正文与交付 thread 根消息（Story、修复范围）理解修复后的行为；GRM-664 中本 Bug 最新 `kind=bug` 记录的 `source`、`sourceUrl` 与 `delivery.permalink`。
-   - Intercom：经 intercom skill `get-conversation` 理解客户诉求与客服当时的答复；`get-teammates` 取 `primary_admin_id` 对应客服，用其 email 经 slack skill `resolve` 找到 Slack 用户。Winches 指定 CS 时以指定为准。没有主要客服、解析不到或账号已停用时，在草稿中写明原因并请 Winches 指定，不猜测。不在草稿、评论或台账中输出客服邮箱。
+| 首行 | 动作 |
+|---|---|
+| `回告` | 起草，第二行起是起草要求（如指定 CS、调整语气） |
+| `确认发布` | 仅 Intercom：以 Winches 的 Slack 身份把已审核草稿私信给 CS；第二行可附私信链接 |
+| `已回告` | Winches 已自行发送（Canny、Facebook，或自行私信的 Intercom），只记录台账 |
+| `不回告` | 本 Bug 不回告，其后内容为原因，只记录台账 |
+
+除 `确认发布` 外不私信或 @ 任何人；任何指令都不编辑删除消息、不加 reaction、不在 Intercom、Canny、Facebook 写入。写入前先查台账与对应触发评论的既有回执，已完成的动作复用，不重复发送或记录。
+
+### 起草（`回告`）
+
+1. 核对上线：对 `/Users/moego-winches/Desktop/Company/person/slack-multica-relay` 执行 `git fetch origin main`，`git show origin/main:scripts/duty-board.py` 导出到临时目录，以 `--project 724dce94-a8b9-44e7-8390-9c3cbdac7bc0 --ledger-issue GRM-664 --start 2026-10-12 --reviewer <审查人 Slack 用户 ID> --output-dir <临时目录>` 运行，读取 `board.json` 中本 Bug。`state` 不是 `released` 时回复实际状态并结束。上线版本取各 PR 的 `release.tag`，上线日期取其中最晚的 `release.at`（Asia/Shanghai）。
+2. 读取材料：本任务正文与交付 thread 根消息（Story、修复范围）；GRM-664 中本 Bug 最新 `kind=bug` 记录的 `source`、`sourceUrl` 与 `delivery.permalink`。
+   - Intercom：经 intercom skill `get-conversation` 理解客户诉求；`get-teammates` 取 `primary_admin_id` 对应客服，用其 email 经 slack skill `resolve` 找到 Slack 用户。Winches 指定 CS 时以指定为准。没有主要客服、解析不到或账号已停用时，在草稿中写明原因并请 Winches 指定，不猜测。不在草稿、评论或台账中输出客服邮箱。
    - Canny：以任务正文中已核实的问题描述为准；需要原帖细节时按 `moe-feedback-collector` 的 Canny 授权路径只读访问。
-   - Facebook：`sourceUrl` 是 Slack 汇总消息，经 slack skill 读取；无法访问 Facebook 原帖，由 Winches 自行找到原帖发送。
-3. 起草：对外文案用英文，只写客户可感知的问题、修复后的行为和上线日期；不写 PR、仓库、内部任务链接、根因技术细节、员工或客户个人信息，不编造客户原话，不承诺未验证的范围或时间；需要客户操作（如刷新页面、更新 App）时须有依据。Intercom 写两段：给 CS 的 Slack 私信（说明该 Intercom 会话中的问题已修复上线，虽然没有 CS 工单，请其回复客户），以及建议 CS 回复客户的话。Canny、Facebook 写一条以 MoeGo 官方身份发在原帖下的留言。
-4. 发布草稿：作为该 Bug 交付 thread 的回复，按 Slack Skill 使用 `send --channel <交付频道 ID> --thread-ts <交付根消息 ts> --text-file <草稿> --as bot`，先 `--dry-run` 核对 mention 清单为空，再用 `preview_digest` 以 `--confirm-preview` 发送，`get` 回读得到 ts 与 permalink。CS 只写名字和 Slack 资料链接 `https://moegoworkspace.slack.com/team/<Slack 用户 ID>`，不写 `<@…>`。草稿模板：
+   - Facebook：`sourceUrl` 是 Slack 汇总消息，经 slack skill 读取；原帖由 Winches 自行找到。
+3. 起草英文文案：只写客户可感知的问题、修复后的行为、上线日期与验证结论；不写 PR、仓库、根因技术细节、员工或客户个人信息，不编造客户原话，不承诺未验证的范围或时间；需要客户操作（如刷新页面、更新 App）时须有依据。
+   - Intercom：给 CS 的 Slack 私信，附 Intercom 会话链接，说明问题已修复上线及验证结论，虽然没有 CS 工单，请其告知客户，并说明附有英文验收报告。另取本 Bug 最终完整 HTML 验收报告（交付 thread 附件，经 slack skill `files_download` 下载），翻译正文、图注和交互提示为英文，保留截图、结构与脚本，检查可独立打开、图片加载和版本切换正常。
+   - Canny、Facebook：一条以 MoeGo 官方身份发在原帖下的留言。
+4. 发布草稿：作为该 Bug 交付 thread 的回复以 Bot 身份发送。Intercom 用 `files_upload --channel <交付频道 ID> --thread-ts <交付根消息 ts> --file <英文报告> --message <草稿全文> --as bot`，使草稿与报告在同一条消息；Canny、Facebook 用 `send --thread-ts <交付根消息 ts> --text-file <草稿> --as bot`，先 `--dry-run` 核对 mention 清单为空再发送。草稿不含 `@` 或 `<@…>`，CS 只写名字和 Slack 资料链接。用 `get` 回读得到草稿链接。草稿模板：
 
    ~~~markdown
    **上线回告草稿｜<Bug 编号>｜问题摘要**
@@ -138,21 +151,19 @@ Winches 在已交付 Bug 任务中发表首行为 `回告` 的评论时（核对
    **上线：** release-xxx（YYYY-MM-DD）
    **回告对象：** CS <名字>（[Slack 资料](https://moegoworkspace.slack.com/team/<Slack 用户 ID>)）/ Canny 原帖留言 / Facebook 原帖留言（原帖请自行找到）
 
-   **发给 CS 的私信**（仅 Intercom）
    ```text
-   英文私信
+   英文私信或留言
    ```
 
-   **建议 CS 回复客户**（Intercom）/ **原帖留言**（Canny、Facebook）
-   ```text
-   英文回复
-   ```
-
-   请审核后自行发送。发出后在本条点 📤；不回告点 🔕，原因可回复以 🔕 开头的消息。
+   Intercom：审核草稿与英文报告后在 Multica 任务评论「确认发布」，由 Agent 以你的身份私信 CS。Canny / Facebook：请自行发送，发出后评论「已回告」。不回告请评论「不回告」并写原因。
    ~~~
 
-5. 台账：在 GRM-664 追加回告记录 `{"issue":"<Bug 任务编号>","kind":"notify","source":"intercom|canny|facebook","triggerCommentId":"<触发评论 ID>","draft":{"permalink":"<草稿消息链接>","ts":"<草稿消息 ts>","at":"<发送时间>"},"cs":{"intercomAdminId":"<客服 admin ID>","slackUserId":"<Slack 用户 ID>"}}`，非 Intercom 或未识别 CS 时 `cs` 为 null。再次 `回告` 时重新起草新的一条并追加完整新记录，不编辑旧草稿；看板以最新记录为准。
-6. 在触发评论下回复一句结论、草稿链接与回告对象；CS 未识别或材料缺口一并说明。
+5. 触发评论回复：草稿链接、回告对象，CS 未识别或材料缺口一并说明。起草不写台账；再次 `回告` 时重新起草新的一条，不编辑旧草稿。
+
+### 发送与记录
+
+- `确认发布`：只发送触发评论之前最近一次 `回告` 回执中的草稿。从草稿消息读取 text 代码块中的私信正文与英文报告附件，原文发送，不改写。私信会话：第二行有私信链接时用其会话 ID；否则用 slack skill `search 'in:<@CS Slack 用户 ID>' --as user` 找到与该 CS 的已有私信会话（`D…`）。找不到时回复请 Winches 在 Slack 打开与该 CS 的私信并在 `确认发布` 第二行附链接，然后结束。以 `--as user` 先 `send --dry-run` 核对 mention 清单为空，再发送私信正文；再用 `files_upload --thread-ts <私信消息 ts> --file <英文报告> --as user` 附在该消息 thread；`get` 回读作者、正文与附件。身份不是 Winches 或发送结果不明时先回读，不换身份重试。非 Intercom 来源回复请 Winches 自行发送后评论 `已回告`。
+- 台账：`确认发布`、`已回告`、`不回告` 完成后在 GRM-664 追加 `{"issue":"<Bug 任务编号>","kind":"notify","source":"intercom|canny|facebook","state":"sent|skipped","at":"<发送时间；已回告、不回告取触发评论时间>","via":"slack_dm|manual|null","commentId":"<触发评论 ID>","message":"<私信消息链接或 null>","cs":{"intercomAdminId":"<客服 admin ID>","slackUserId":"<Slack 用户 ID>"},"reason":"<不回告原因或 null>"}`，非 Intercom 或未识别 CS 时 `cs` 为 null；写后回读。看板以每个 Bug 最新一条 notify 记录为准，`at` 是回应跟踪起点。
 
 ## 隔离接续试跑
 
