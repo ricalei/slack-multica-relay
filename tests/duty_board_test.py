@@ -48,18 +48,21 @@ class ReleaseTests(unittest.TestCase):
 
 
 class LedgerTests(unittest.TestCase):
-    def test_latest_entry_per_issue_wins_and_bad_records_are_reported(self):
+    def test_latest_entry_per_issue_and_kind_wins_and_bad_records_are_reported(self):
         def comment(cid, created, body):
             return {'id': cid, 'created_at': created, 'content': f'{board_module.BOARD_MARKER}\n说明\n```json\n{body}\n```'}
         comments = [
-            comment('c2', '2026-10-14T02:00:00Z', '{"issue":"GRM-1","v":2}'),
-            comment('c1', '2026-10-14T01:00:00Z', '[{"issue":"GRM-1","v":1},{"issue":"GRM-2","v":1}]'),
-            {'id': 'c3', 'created_at': '2026-10-14T03:00:00Z', 'content': '普通评论 ```json\n{"issue":"GRM-1","v":9}\n```'},
+            comment('c2', '2026-10-14T02:00:00Z', '{"issue":"GRM-1","kind":"bug","v":2}'),
+            comment('c1', '2026-10-14T01:00:00Z',
+                    '[{"issue":"GRM-1","kind":"bug","v":1},{"issue":"GRM-2","kind":"scan","v":1}]'),
+            {'id': 'c3', 'created_at': '2026-10-14T03:00:00Z', 'content': '普通评论 ```json\n{"issue":"GRM-1","kind":"bug","v":9}\n```'},
             comment('c4', '2026-10-14T04:00:00Z', '{oops'),
             comment('c5', '2026-10-14T05:00:00Z', '{"v":3}'),
+            comment('c6', '2026-10-14T06:00:00Z', '{"issue":"GRM-1","kind":"notify","v":1}'),
         ]
         entries, errors = board_module.ledger_entries(comments)
-        self.assertEqual({key: value['v'] for key, value in entries.items()}, {'GRM-1': 2, 'GRM-2': 1})
+        self.assertEqual({key: value['v'] for key, value in entries.items()},
+                         {('GRM-1', 'bug'): 2, ('GRM-2', 'scan'): 1, ('GRM-1', 'notify'): 1})
         self.assertEqual(len(errors), 2)
 
 

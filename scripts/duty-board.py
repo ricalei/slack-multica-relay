@@ -39,8 +39,9 @@ def find_release(merge_sha, runs, contains):
 
 
 def ledger_entries(comments):
-    """台账任务评论 → {任务编号: 字段}。每条带标记的评论含一个 JSON 对象或数组，
-    每项须有 issue 字段；同一任务以最新评论（同评论内靠后项）为准。"""
+    """台账任务评论 → {(任务编号, kind): 字段}。每条带标记的评论含一个 JSON 对象或数组，
+    每项须有 issue 字段；同一任务的同类记录以最新评论（同评论内靠后项）为准。
+    同一 Bug 可有 bug 与 notify（回告）等多类记录，按 kind 分开取最新，互不覆盖。"""
     entries, errors = {}, []
     for comment in sorted(comments, key=lambda item: item['created_at']):
         content = comment.get('content') or ''
@@ -54,7 +55,7 @@ def ledger_entries(comments):
                 continue
             for item in value if isinstance(value, list) else [value]:
                 if isinstance(item, dict) and isinstance(item.get('issue'), str):
-                    entries[item['issue']] = item
+                    entries[(item['issue'], item.get('kind'))] = item
                 else:
                     errors.append(f"台账评论 {comment.get('id')} 有缺少 issue 的记录")
     return entries, errors
@@ -395,14 +396,12 @@ def collect(args):
         is_scan = bool(_meta(issue, 'dailyScan')) and issue['created_at'][:10] >= start.isoformat()
         if not (is_bug or is_scan):
             continue
-        board = ledger.get(issue['identifier'])
+        board = ledger.get((issue['identifier'], 'bug' if is_bug else 'scan'))
         if board is None:
             warnings.append(f"{issue['identifier']} 在字段台账中没有记录，未计入看板")
             continue
-        if board.get('kind') == 'scan':
+        if not is_bug:
             scans.append({**board, 'identifier': issue['identifier'], 'createdAt': issue['created_at']})
-            continue
-        if board.get('kind') != 'bug':
             continue
         bug = {'identifier': issue['identifier'], 'url': args.issue_url_base + issue['identifier'],
                'summary': issue['title'].split('｜')[-1], 'feedbackDate': board['feedbackDate'],
