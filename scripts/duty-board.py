@@ -422,7 +422,7 @@ def main(argv=None):
     parser.add_argument('--ledger-issue', required=True, help='看板字段台账任务 ID 或编号')
     parser.add_argument('--start', required=True, help='d1 对应的反馈日（YYYY-MM-DD）')
     parser.add_argument('--today', help='Asia/Shanghai 当天日期，默认取当前时间')
-    parser.add_argument('--reviewer', default='U06GM8PAFEX', help='有权用 🚫 标注不上线的 Slack 用户 ID')
+    parser.add_argument('--reviewer', required=True, help='有权用 🚫 标注不上线的 Slack 用户 ID')
     parser.add_argument('--slack-cli', default=os.path.expanduser('~/.agents/skills/slack/scripts/slack.py'))
     parser.add_argument('--issue-url-base', default='https://multica.devops.moego.dev/grm/issues/')
     parser.add_argument('--board-link', help='常驻看板任务链接，附在 Slack 版末尾')
