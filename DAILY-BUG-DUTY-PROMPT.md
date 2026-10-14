@@ -123,6 +123,16 @@ Story 默认最多 2 条，写清用户、场景、操作、预期、实际偏�
 
 只有任务正文与 metadata 都明确 `mode=gate_test` 时，使用指定的两项虚拟 Bug 验证自动串行接续。不得采集客户反馈、改代码、建 PR、发 Slack、生成业务报告或调用生产业务。父任务和两个子项都必须标明测试模式；只在隔离测试批次中用明确模拟记录替代真实交付，保存测试版 deliveryVersion=1、state=delivered、simulatedDelivery=true，说明“模拟交付，无真实 PR/验收报告”。按与真实批次相同的父子关系、队列位置、单任务和查重规则，只指派下一测试项并回读排队后结束当前运行，无需真人确认。最后一项保存父批次 state=completed/outcome=gate_test_completed/currentIssueId=null。已交付项再次被唤醒只核对既有结果，不再派发或改动队列。测试结果不代表真实修复通过，不写入真实批次或造真人确认。
 
+## 看板字段台账
+
+每日值守看板只读取台账任务「每日 Bug 值守看板｜字段台账」（GRM-664，`01a139d1-918a-741c-93ad-29b7d5a1c6b0`）中的记录，不读取 dailyBatch、dailyBug 或 dailyScan。台账任务无人指派，在其下评论不会唤醒 Agent；不在其它任务上新增看板 metadata，任务 metadata 总量上限为 8KB。
+
+- 写法：在台账任务追加顶层评论，首行 `<!-- duty-board:v1 -->`，再写一句说明和一个 ```json 代码块，内容为单个对象或同一次写入的对象数组。字段变化时追加完整新记录，不修改或删除旧评论；看板以每个任务的最新记录为准。写后用 `issue comment list` 回读，确认 JSON 可解析且字段一致。
+- 扫描记录：每次 scan 结束（含零项合格、缺源）写入 `{"issue":"<扫描任务编号>","kind":"scan","feedbackDate":"<上海目标反馈日>","coverageComplete":true|false,"collected":{"canny":n,"facebook":n,"intercom":n},"nonBug":n,"productDecision":n,"csFollowed":n,"suspected":n,"outcomes":{"confirmed":n,"duplicate":n,"verificationBlocked":n,"excludedAfterInvestigation":n}}`；一次 scan 覆盖多个反馈日时每日一条，outcomes 为本次扫描结束时的状态。
+- Bug 记录：每个确认可修的 Bug 建任务后立即写入 `{"issue":"<Bug 任务编号>","kind":"bug","feedbackDate":"<原反馈创建的上海日期>","source":"canny|facebook|intercom","sourceUrl":"<原反馈链接>","candidateId":"<候选 ID>","prs":[],"delivery":null}`，只登记未启动的 Bug 也要写。PR 创建或增减、首次 Slack 交付后，追加该 Bug 的完整新记录：`prs` 为全部 PR 链接，`delivery` 为 `{"permalink":"<该 Bug Slack 交付 thread 根消息链接>"}`。
+- 分类口径，每条采集记录只计一次：collected 合计 = nonBug + productDecision + csFollowed + suspected。nonBug 指不描述既有功能异常的记录（咨询、闲聊、操作或账务请求等）；productDecision 指新增能力或需要产品取舍的诉求；csFollowed 指按已有工单跟进规则跳过的记录；suspected 指描述既有功能异常、进入 Bug 调查的记录，等于 confirmed + duplicate + verificationBlocked + excludedAfterInvestigation。Bug 按原反馈日归属，不按发现它的扫描日。
+- 台账写入失败不阻塞修复和交付：在当前任务记录待补写内容，下次运行补写。看板只读，不据此推进或改变队列；Winches 在交付 thread 点 🚫 只表示不上线统计，不作为返工、暂停或跳过指令。
+
 ## 结束与恢复
 
 用原任务 metadata、评论及真实产物记录当前阶段、来源覆盖、current/total、交付和审查版本、worktree、PR、报告、自动接续回执、下一动作和阻塞。恢复先回读，不重新扫描/修改已有效部分，不重复启动在途任务或发送相同结果。仅清理本任务自有且不再需要的临时资源，保留评审所需证据和接续现场。定时采集、任务串行接续与人工审查分别处理，不假定普通 Slack 回复能唤醒 Multica；未验证的通道不得承诺可自动触发返工。
