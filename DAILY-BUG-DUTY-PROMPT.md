@@ -113,11 +113,46 @@ Story 默认最多 2 条，写清用户、场景、操作、预期、实际偏�
 
 最后一项完整交付后将父批次标为 `state=completed`、`outcome=engineering_delivery_completed`、`currentIssueId=null`，父任务保留 in_review；发送一次批次汇总，列出每项 current/total、问题、Multica、PR 与报告链接和实际限制，集中供人工审查，不创建新批次或启用定时。批次 completed 表示固定队列已完成工程交付，不表示人工验收、PR 合并或生产发布。有真人明确跳过的未完成项时，outcome 改为 finished_with_skips，汇总逐项说明缺口，不能宣称全部修复已交付。
 
-人工修改、暂停、取消或跳过仍通过对应 Multica 任务评论提出，核对真实作者、评论 ID、所属任务、交付版本和语义。要求返工时复用该 Bug 的分支、PR 和证据，串行修订、局部复验并更新报告与 deliveryVersion；更新父任务的该项交付记录，不把旧任务再放行一次或打乱已启动的队列。普通讨论不当作改动指令，确认通过仅记录该版本人工审查结果，不再作为下一项启动条件。明确跳过真实受阻项时保存授权评论与未完成范围，按固定顺序推进；跳过不计为完整交付。
+人工修改、暂停、取消或跳过仍通过对应 Multica 任务评论提出，核对真实作者、评论 ID、所属任务、交付版本和语义。要求返工时复用该 Bug 的分支、PR 和证据，串行修订、局部复验并更新报告与 deliveryVersion；更新父任务的该项交付记录，不把旧任务再放行一次或打乱已启动的队列。普通讨论不当作改动指令，首行为 `回告` 的评论按第 4 节处理，确认通过仅记录该版本人工审查结果，不再作为下一项启动条件。明确跳过真实受阻项时保存授权评论与未完成范围，按固定顺序推进；跳过不计为完整交付。
 
 旧批次若停在 awaiting_confirmation，先回读已交付项的真实版本、完整报告和交付回执：满足新规则就迁移为 delivered 与 pending_human_review 并接续；缺修复、验收或交付证据时补缺口，不凭旧状态放行。acceptedCommentIds 等既有真人确认记录仅作审计保留，不补造新记录。
 
 开工后发现本项需要产品决策时停止修复，只说明排除理由，等待 Winches 明确“跳过”再前进；不生成决策模板、不发产品决策请求。
+
+## 4. 上线回告（只起草）
+
+Winches 在已交付 Bug 任务中发表首行为 `回告` 的评论时（核对作者为审查人 Multica 用户），本次运行只为该 Bug 起草上线回告，不是返工、暂停或跳过：不改代码、PR、报告、deliveryVersion、dailyBug/dailyBatch metadata、任务状态或队列，不启动其它任务。第二行起是本次起草要求（如指定 CS、调整语气），只约束草稿内容。回告只由 AI 起草、Winches 审核后自行发送：不私信或 @ 任何人，不编辑删除消息、不加 reaction，不在 Intercom、Canny、Facebook 写入。同一触发评论已有草稿回执时复用，不重复发送。
+
+1. 核对上线：按看板同样方式，对 `/Users/moego-winches/Desktop/Company/person/slack-multica-relay` 执行 `git fetch origin main`，`git show origin/main:scripts/duty-board.py` 导出到临时目录，以 `--project 724dce94-a8b9-44e7-8390-9c3cbdac7bc0 --ledger-issue GRM-664 --start 2026-10-12 --reviewer <审查人 Slack 用户 ID> --output-dir <临时目录>` 运行，读取 `board.json` 中本 Bug。`state` 不是 `released` 时在触发评论下回复实际状态并结束，不起草。上线版本取各 PR 的 `release.tag`，上线日期取其中最晚的 `release.at`（Asia/Shanghai）。
+2. 读取材料：本任务正文与交付 thread 根消息（Story、修复范围）理解修复后的行为；GRM-664 中本 Bug 最新 `kind=bug` 记录的 `source`、`sourceUrl` 与 `delivery.permalink`。
+   - Intercom：经 intercom skill `get-conversation` 理解客户诉求与客服当时的答复；`get-teammates` 取 `primary_admin_id` 对应客服，用其 email 经 slack skill `resolve` 找到 Slack 用户。Winches 指定 CS 时以指定为准。没有主要客服、解析不到或账号已停用时，在草稿中写明原因并请 Winches 指定，不猜测。不在草稿、评论或台账中输出客服邮箱。
+   - Canny：以任务正文中已核实的问题描述为准；需要原帖细节时按 `moe-feedback-collector` 的 Canny 授权路径只读访问。
+   - Facebook：`sourceUrl` 是 Slack 汇总消息，经 slack skill 读取；无法访问 Facebook 原帖，由 Winches 自行找到原帖发送。
+3. 起草：对外文案用英文，只写客户可感知的问题、修复后的行为和上线日期；不写 PR、仓库、内部任务链接、根因技术细节、员工或客户个人信息，不编造客户原话，不承诺未验证的范围或时间；需要客户操作（如刷新页面、更新 App）时须有依据。Intercom 写两段：给 CS 的 Slack 私信（说明该 Intercom 会话中的问题已修复上线，虽然没有 CS 工单，请其回复客户），以及建议 CS 回复客户的话。Canny、Facebook 写一条以 MoeGo 官方身份发在原帖下的留言。
+4. 发布草稿：作为该 Bug 交付 thread 的回复，按 Slack Skill 使用 `send --channel <交付频道 ID> --thread-ts <交付根消息 ts> --text-file <草稿> --as bot`，先 `--dry-run` 核对 mention 清单为空，再用 `preview_digest` 以 `--confirm-preview` 发送，`get` 回读得到 ts 与 permalink。CS 只写名字和 Slack 资料链接 `https://moegoworkspace.slack.com/team/<Slack 用户 ID>`，不写 `<@…>`。草稿模板：
+
+   ~~~markdown
+   **上线回告草稿｜<Bug 编号>｜问题摘要**
+
+   **来源：** [Intercom 会话 / Canny 帖子 / Facebook 汇总消息](sourceUrl)
+   **上线：** release-xxx（YYYY-MM-DD）
+   **回告对象：** CS <名字>（[Slack 资料](https://moegoworkspace.slack.com/team/<Slack 用户 ID>)）/ Canny 原帖留言 / Facebook 原帖留言（原帖请自行找到）
+
+   **发给 CS 的私信**（仅 Intercom）
+   ```text
+   英文私信
+   ```
+
+   **建议 CS 回复客户**（Intercom）/ **原帖留言**（Canny、Facebook）
+   ```text
+   英文回复
+   ```
+
+   请审核后自行发送。发出后在本条点 📤；不回告点 🔕，原因可回复以 🔕 开头的消息。
+   ~~~
+
+5. 台账：在 GRM-664 追加回告记录 `{"issue":"<Bug 任务编号>","kind":"notify","source":"intercom|canny|facebook","triggerCommentId":"<触发评论 ID>","draft":{"permalink":"<草稿消息链接>","ts":"<草稿消息 ts>","at":"<发送时间>"},"cs":{"intercomAdminId":"<客服 admin ID>","slackUserId":"<Slack 用户 ID>"}}`，非 Intercom 或未识别 CS 时 `cs` 为 null。再次 `回告` 时重新起草新的一条并追加完整新记录，不编辑旧草稿；看板以最新记录为准。
+6. 在触发评论下回复一句结论、草稿链接与回告对象；CS 未识别或材料缺口一并说明。
 
 ## 隔离接续试跑
 
@@ -127,7 +162,7 @@ Story 默认最多 2 条，写清用户、场景、操作、预期、实际偏�
 
 每日值守看板只读取台账任务「每日 Bug 值守看板｜字段台账」（GRM-664，`01a139d1-918a-741c-93ad-29b7d5a1c6b0`）中的记录，不读取 dailyBatch、dailyBug 或 dailyScan。台账任务无人指派，在其下评论不会唤醒 Agent；不在其它任务上新增看板 metadata，任务 metadata 总量上限为 8KB。
 
-- 写法：在台账任务追加顶层评论，首行 `<!-- duty-board:v1 -->`，再写一句说明和一个 ```json 代码块，内容为单个对象或同一次写入的对象数组。字段变化时追加完整新记录，不修改或删除旧评论；看板以每个任务的最新记录为准。写后用 `issue comment list` 回读，确认 JSON 可解析且字段一致。
+- 写法：在台账任务追加顶层评论，首行 `<!-- duty-board:v1 -->`，再写一句说明和一个 ```json 代码块，内容为单个对象或同一次写入的对象数组。字段变化时追加完整新记录，不修改或删除旧评论；看板按任务与记录类型（kind）各取最新一条，同一 Bug 的 bug 与 notify 记录互不覆盖。写后用 `issue comment list` 回读，确认 JSON 可解析且字段一致。
 - 扫描记录：每次 scan 结束（含零项合格、缺源）写入 `{"issue":"<扫描任务编号>","kind":"scan","feedbackDate":"<上海目标反馈日>","coverageComplete":true|false,"collected":{"canny":n,"facebook":n,"intercom":n},"nonBug":n,"productDecision":n,"csFollowed":n,"suspected":n,"outcomes":{"confirmed":n,"duplicate":n,"verificationBlocked":n,"excludedAfterInvestigation":n}}`；一次 scan 覆盖多个反馈日时每日一条，outcomes 为本次扫描结束时的状态。
 - Bug 记录：每个确认可修的 Bug 建任务后立即写入 `{"issue":"<Bug 任务编号>","kind":"bug","feedbackDate":"<原反馈创建的上海日期>","source":"canny|facebook|intercom","sourceUrl":"<原反馈链接>","candidateId":"<候选 ID>","prs":[],"delivery":null}`，只登记未启动的 Bug 也要写。PR 创建或增减、首次 Slack 交付后，追加该 Bug 的完整新记录：`prs` 为全部 PR 链接，`delivery` 为 `{"permalink":"<该 Bug Slack 交付 thread 根消息链接>"}`。
 - 分类口径，每条采集记录只计一次：collected 合计 = nonBug + productDecision + csFollowed + suspected。nonBug 指不描述既有功能异常的记录（咨询、闲聊、操作或账务请求等）；productDecision 指新增能力或需要产品取舍的诉求；csFollowed 指按已有工单跟进规则跳过的记录；suspected 指描述既有功能异常、进入 Bug 调查的记录，等于 confirmed + duplicate + verificationBlocked + excludedAfterInvestigation。Bug 按原反馈日归属，不按发现它的扫描日。
