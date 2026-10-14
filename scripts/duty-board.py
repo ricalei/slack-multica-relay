@@ -15,9 +15,6 @@ TZ = ZoneInfo('Asia/Shanghai')
 PROD_WORKFLOW = 'Release to PRODUCTION'
 REJECT_EMOJI = 'no_entry_sign'
 REJECT_PREFIXES = ('🚫', ':no_entry_sign:')
-# 回告草稿上的标记：表情点在草稿消息上，或在草稿之后回复以表情/文字开头。
-NOTIFY_MARKS = {'skipped': ('no_bell', ('🔕', ':no_bell:', '不回告')),
-                'sent': ('outbox_tray', ('📤', ':outbox_tray:', '已回告'))}
 PR_URL = re.compile(r'https://github\.com/([^/]+/[^/]+)/pull/(\d+)')
 # 看板字段集中记在无人指派的台账任务评论里：任务 metadata 有 8KB 上限且已被值守状态占用，
 # 在指派给 Agent 的任务下评论又会唤醒它。
@@ -74,47 +71,27 @@ def compare_contains(compare, number):
                for commit in compare.get('commits') or [])
 
 
-def _reactions_by(message, reviewer):
-    return {reaction.get('name', '').split('::')[0] for reaction in message.get('reactions') or []
-            if reviewer in (reaction.get('users') or [])}
-
-
-def _reviewer_text(message, reviewer):
-    author = message.get('author') or {}
-    return (message.get('text_raw') or '').strip() if reviewer in (author.get('user_id'), author.get('id')) else ''
-
-
 def rejection(messages, reviewer, emoji=REJECT_EMOJI):
     """审查人在交付 thread 任意消息上点 🚫 即不上线；原因取其最新一条以 🚫 开头的回复。"""
-    if not any(emoji in _reactions_by(message, reviewer) for message in messages):
+    rejected = any(reviewer in (reaction.get('users') or []) and reaction.get('name', '').split('::')[0] == emoji
+                   for message in messages for reaction in message.get('reactions') or [])
+    if not rejected:
         return None
     reason = None
     for message in messages:
-        text = _reviewer_text(message, reviewer)
-        if text.startswith(REJECT_PREFIXES):
+        author = message.get('author') or {}
+        text = (message.get('text_raw') or '').strip()
+        if reviewer in (author.get('user_id'), author.get('id')) and text.startswith(REJECT_PREFIXES):
             for prefix in REJECT_PREFIXES:
                 text = text.removeprefix(prefix)
             reason = text.strip(' ：:｜|') or reason
     return {'reason': reason}
 
 
-def notify_state(messages, notify, reviewer):
-    """已上线 Bug 的回告进度：台账无起草记录为 pending；审查人在草稿消息上点 🔕/📤，
-    或在草稿之后回复以 🔕/「不回告」、📤/「已回告」开头，分别为 skipped/sent（🔕 优先）；否则为 drafted。"""
-    draft_ts = ((notify or {}).get('draft') or {}).get('ts')
-    if not draft_ts:
-        return 'pending'
-    marks = set()
-    for message in messages:
-        if message.get('ts') == draft_ts:
-            marks |= _reactions_by(message, reviewer)
-        elif float(message.get('ts') or 0) > float(draft_ts):
-            text = _reviewer_text(message, reviewer)
-            marks |= {emoji for emoji, prefixes in NOTIFY_MARKS.values() if text.startswith(prefixes)}
-    for state, (emoji, _) in NOTIFY_MARKS.items():
-        if emoji in marks:
-            return state
-    return 'drafted'
+def notify_state(notify):
+    """已上线 Bug 的回告进度：取台账最新 notify 记录的 sent / skipped，没有记录为 pending。"""
+    state = (notify or {}).get('state')
+    return state if state in ('sent', 'skipped') else 'pending'
 
 
 def bug_state(prs, rejected):
@@ -223,8 +200,8 @@ def attention(board, now):
     items = {'notify': [], 'merged': [], 'review': [], 'pr_closed': [], 'unrejectable': [], 'fixing': []}
     for bug in board['bugs']:
         state = bug['state']
-        if state == 'released' and bug.get('notify') in ('pending', 'drafted'):
-            items['notify'].append((bug, '草稿待发' if bug['notify'] == 'drafted' else None))
+        if state == 'released' and bug.get('notify') == 'pending':
+            items['notify'].append((bug, None))
         elif state == 'merged':
             merged = max((pr['mergedAt'] for pr in bug['prs'] if pr.get('mergedAt')), default=None)
             items['merged'].append((bug, _age(merged, now)))
@@ -446,12 +423,11 @@ def collect(args):
                'source': board.get('source'), 'sourceUrl': board.get('sourceUrl'),
                'deliveryPermalink': (board.get('delivery') or {}).get('permalink'), 'rejection': None, 'notify': None}
         bug['prs'] = [github.pr(url) for url in board.get('prs') or []]
-        messages = slack_thread(args.slack_cli, bug['deliveryPermalink']) if bug['deliveryPermalink'] else []
-        bug['rejection'] = rejection(messages, args.reviewer)
+        if bug['deliveryPermalink']:
+            bug['rejection'] = rejection(slack_thread(args.slack_cli, bug['deliveryPermalink']), args.reviewer)
         bug['state'] = bug_state(bug['prs'], bug['rejection'] is not None)
-        # 回告草稿回复在交付 thread 中，只跟踪已上线的 Bug。
         if bug['state'] == 'released':
-            bug['notify'] = notify_state(messages, ledger.get((issue['identifier'], 'notify')), args.reviewer)
+            bug['notify'] = notify_state(ledger.get((issue['identifier'], 'notify')))
         bugs.append(bug)
     return scans, bugs, warnings
 
