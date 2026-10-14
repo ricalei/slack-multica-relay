@@ -145,6 +145,7 @@ def build_board(scans, bugs, start, today):
             'label': f'd{(day - start).days + 1} · {day:%m-%d}', 'date': key, 'scanned': scan is not None,
             'collected': sum(collected.values()) if isinstance(collected, dict) else None,
             'collectedBySource': collected, 'suspected': scan.get('suspected') if scan else None,
+            'suspectedEstimated': bool(scan and scan.get('suspectedEstimated')),
             'coverageComplete': scan.get('coverageComplete') if scan else None,
             **_layers([bug for bug in bugs if bug['feedbackDate'] == key]),
         })
@@ -156,7 +157,8 @@ def build_board(scans, bugs, start, today):
         return sum(values) if values and all(isinstance(value, int) for value in values) else None
     in_window = [bug for bug in bugs if start.isoformat() <= bug['feedbackDate'] <= yesterday.isoformat()]
     total = {'label': f'累计（d1–d{len(rows)}）', 'collected': total_of('collected'),
-             'suspected': total_of('suspected'), **_layers(in_window)}
+             'suspected': total_of('suspected'), 'suspectedEstimated': any(row['suspectedEstimated'] for row in rows),
+             **_layers(in_window)}
     warnings = [warning for scan in latest_scan.values() for warning in scan_warnings(scan)]
     return {'start': start.isoformat(), 'through': yesterday.isoformat(), 'rows': rows, 'trial': trial,
             'total': total, 'bugs': sorted(bugs, key=lambda bug: (bug['feedbackDate'], bug['identifier'])),
@@ -171,11 +173,16 @@ def _num(value, scanned=True):
     return '缺失' if value is None else str(value)
 
 
+def _suspected(row, scanned=True):
+    text = _num(row['suspected'], scanned)
+    return f'约 {text}' if row.get('suspectedEstimated') and row['suspected'] is not None else text
+
+
 def _age(since, now):
     if not since:
         return '–'
     days = (now - dt.datetime.fromisoformat(since.replace('Z', '+00:00'))).days
-    return f'{days} 天'
+    return f'{days} 天' if days >= 1 else '不足 1 天'
 
 
 def _pr_links(bug):
@@ -221,7 +228,7 @@ def render_markdown(board, now):
             intake = ['–', '–']
         else:
             scanned = row.get('scanned', True)
-            intake = [_num(row['collected'], scanned), _num(row['suspected'], scanned)]
+            intake = [_num(row['collected'], scanned), _suspected(row, scanned)]
         cells = [row['label'], *intake]
         cells += [str(row[key]) for key in ('confirmed', 'rejected', 'shouldShip', 'delivered', 'merged', 'released')]
         cells += ['–', '–']
@@ -255,21 +262,46 @@ def render_markdown(board, now):
     return '\n'.join(lines) + '\n'
 
 
+# Slack 版按状态分组；已上线、不上线会持续累积，只列前几个编号。
+STATUS_ORDER = ('released', 'merged', 'review', 'pr_closed', 'fixing', 'rejected')
+STATUS_LIST_LIMIT = {'released': 5, 'rejected': 5}
+
+
+def status_lines(board, now):
+    ages = {bug['identifier']: age for entries in attention(board, now).values() for bug, age in entries if age}
+    lines = []
+    for state in STATUS_ORDER:
+        bugs = [bug for bug in board['bugs'] if bug['state'] == state]
+        if not bugs:
+            continue
+        limit = STATUS_LIST_LIMIT.get(state, len(bugs))
+        names = [f"[{bug['identifier']}]({bug['url']})" + (f"（{ages[bug['identifier']]}）" if bug['identifier'] in ages else '')
+                 for bug in bugs[-limit:]]
+        more = f' 等 {len(bugs)} 个' if len(bugs) > limit else ''
+        lines.append(f"- {STATE_LABELS[state]} {len(bugs)}：{'、'.join(names)}{more}")
+    return lines
+
+
 def render_slack(board, now, board_link=None):
-    total = board['total']
-    def chain(row):
-        intake = '' if row is board['trial'] else f"采集 {_num(row['collected'])} → 疑似候选 {_num(row['suspected'])} → "
-        return (f"{intake}确认 {row['confirmed']}（不上线 {row['rejected']}）→ 已交付 {row['delivered']}"
-                f" → 已合并 {row['merged']} → 已上线 {row['released']}")
+    def intake(row):
+        suspected = _suspected(row)
+        gap = '' if suspected.startswith('约') else ' '
+        return f"采集 {_num(row['collected'])} 条 · 疑似{gap}{suspected} 条 · 确认 Bug {row['confirmed']} 个"
     last = board['rows'][-1] if board['rows'] else None
-    lines = [f"**📊 每日 Bug 值守看板｜截至 {board['through']} 反馈日（d1–d{len(board['rows'])}）**", '',
-             f'- 累计：{chain(total)}']
+    lines = [f"**📊 每日 Bug 值守看板｜截至 {board['through'][5:]}**", '']
     if last:
-        lines.append(f"- 昨日（{last['label']}）：" + (chain(last) if last['scanned'] else '未扫描'))
-    if board['trial']:
-        lines.append(f"- 试运行（回溯）：{chain(board['trial'])}")
-    notes = attention_notes(board, now) + [f'- 数据异常：{warning}' for warning in board['warnings']]
-    lines += ['', '**⚠️ 需要关注**', ''] + (notes or ['- 无'])
+        lines += [f"**昨日反馈（{last['date'][5:]}）**：" + (intake(last) if last['scanned'] else '未扫描'), '']
+    trial = board['trial']['confirmed'] if board['trial'] else 0
+    lines.append(f"**Bug 现状**（共 {len(board['bugs'])} 个" + (f"，含试运行 {trial} 个）" if trial else '）'))
+    lines += status_lines(board, now) or ['- 暂无']
+    total = board['total']
+    lines += ['', f"**累计（{board['start'][5:]} 起）**：{intake(total)} · 已上线 {total['released']} 个"]
+    unrejectable = attention(board, now)['unrejectable']
+    notes = [f'- {warning}' for warning in board['warnings']]
+    if unrejectable:
+        notes.append(f"- {ATTENTION_TITLES['unrejectable']}：" + '、'.join(bug['identifier'] for bug, _ in unrejectable))
+    if notes:
+        lines += ['', '**⚠️ 数据提醒**'] + notes
     if board_link:
         lines += ['', f'完整看板：[Multica 常驻任务]({board_link})']
     return '\n'.join(lines) + '\n'

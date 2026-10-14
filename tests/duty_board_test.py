@@ -142,6 +142,28 @@ class BoardTests(unittest.TestCase):
         scan.update(suspected=3, outcomes={**scan['outcomes'], 'verificationBlocked': 2})
         self.assertEqual(board_module.scan_warnings(scan), [])
 
+    def test_status_lines_list_each_bug_once_and_truncate_accumulating_states(self):
+        released = [bug(f'R{index}', f'2026-10-0{index}', 'released', [pr('merged', release={'tag': 't'})])
+                    for index in range(1, 8)]
+        board = board_module.build_board([], released + [bug('W1', '2026-10-13', 'review')],
+                                         dt.date(2026, 10, 13), dt.date(2026, 10, 14))
+        lines = board_module.status_lines(board, NOW)
+        self.assertEqual(len(lines), 2)
+        self.assertIn('R7', lines[0])
+        self.assertNotIn('R2', lines[0])
+        self.assertIn('等 7 个', lines[0])
+        self.assertIn('W1', lines[1])
+        self.assertIn('（2 天）', lines[1])
+
+    def test_estimated_suspected_marks_its_row_and_total(self):
+        scans = [{'identifier': 'S1', 'feedbackDate': '2026-10-12', 'createdAt': 'a', 'collected': {'canny': 9},
+                  'suspected': 4, 'suspectedEstimated': True},
+                 {'identifier': 'S2', 'feedbackDate': '2026-10-13', 'createdAt': 'b', 'collected': {'canny': 9},
+                  'suspected': 5}]
+        board = board_module.build_board(scans, [], dt.date(2026, 10, 12), dt.date(2026, 10, 14))
+        self.assertEqual([board_module._suspected(row) for row in board['rows']], ['约 4', '5'])
+        self.assertEqual(board_module._suspected(board['total']), '约 9')
+
     def test_attention_lists_pending_states_and_unrejectable_bugs(self):
         no_message = {**bug('B2', '2026-10-13', 'review'), 'deliveryPermalink': None}
         board = board_module.build_board([], [bug('B1', '2026-10-13', 'merged', [pr('merged')]), no_message],
