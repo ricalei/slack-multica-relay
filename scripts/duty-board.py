@@ -22,6 +22,7 @@ BOARD_MARKER = '<!-- duty-board:v1 -->'
 BOARD_JSON = re.compile(r'```json\n([\s\S]*?)\n```')
 SCAN_SPLIT = ('nonBug', 'productDecision', 'csFollowed', 'suspected')
 SCAN_OUTCOMES = ('confirmed', 'duplicate', 'verificationBlocked', 'excludedAfterInvestigation')
+FOLLOW_UP_DAYS = 14
 STATE_LABELS = {
     'rejected': '⛔ 不上线', 'released': '🟢 已上线', 'merged': '🟡 已合并待上线',
     'review': '⚪ 待审', 'pr_closed': '⚠️ PR 已关闭未合并', 'fixing': '🔧 修复中',
@@ -94,6 +95,55 @@ def notify_state(notify):
     return state if state in ('sent', 'skipped') else 'pending'
 
 
+def _iso(timestamp):
+    return dt.datetime.fromtimestamp(timestamp, dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def _parse(value):
+    return dt.datetime.fromisoformat(value.replace('Z', '+00:00'))
+
+
+def _part_time(part):
+    return dt.datetime.fromtimestamp(part['created_at'], dt.timezone.utc)
+
+
+def follow_up(source, notify, record, read, now):
+    """已回告 Bug 的回应进度，从回告时间 notify.at 起跟踪 FOLLOW_UP_DAYS 天。
+    Intercom 须先由看板 Agent 判断 CS 回复确实告知客户已修复上线（记 csInformedAt），之后的客户消息才算回应；
+    判断结果与回应时间记在 notify-followup 记录，judgedThrough 之前的 CS 回复不再重复判断。
+    record 为最新 notify-followup，notifyAt 与本次回告不同则视为旧回告的记录；read() 读取会话消息，失败返回 None。
+    返回 {'state', 'candidates': 待判断的 CS 回复, 'proposal': 待写入台账的记录}。"""
+    if source == 'facebook':
+        return {'state': 'untracked'}
+    if source != 'intercom':
+        return {'state': 'not_integrated'}
+    record = record if record and record.get('notifyAt') == notify['at'] else {
+        'issue': notify['issue'], 'kind': 'notify-followup', 'notifyAt': notify['at'],
+        'judgedThrough': None, 'csInformedAt': None, 'csInformedPartId': None, 'respondedAt': None}
+    if record.get('respondedAt'):
+        return {'state': 'responded', 'respondedAt': record['respondedAt']}
+    deadline = _parse(notify['at']) + dt.timedelta(days=FOLLOW_UP_DAYS)
+    base = {'deadline': deadline.isoformat(), 'csInformedAt': record.get('csInformedAt')}
+    if now > deadline:
+        return {'state': 'expired', **base}
+    parts = read()
+    if parts is None:
+        return {'state': 'unread', **base}
+    if not record.get('csInformedAt'):
+        since = _parse(record.get('judgedThrough') or notify['at'])
+        candidates = [{'partId': part['id'], 'at': _iso(part['created_at']), 'text': part['text'][:2000]}
+                      for part in parts if part['author_type'] == 'admin' and part['part_type'] != 'note'
+                      and _part_time(part) > since]
+        return {'state': 'awaiting_cs', **base, 'candidates': candidates, 'record': record}
+    informed = _parse(record['csInformedAt'])
+    replies = [part for part in parts if part['author_type'] in ('user', 'lead')
+               and _part_time(part) > informed]
+    if not replies:
+        return {'state': 'cs_informed', **base}
+    responded = _iso(min(part['created_at'] for part in replies))
+    return {'state': 'responded', 'respondedAt': responded, 'proposal': {**record, 'respondedAt': responded}}
+
+
 def bug_state(prs, rejected):
     if rejected:
         return 'rejected'
@@ -134,6 +184,8 @@ def _layers(bugs):
         'delivered': sum(1 for bug in alive if bug['prs']),
         'merged': sum(1 for bug in alive if bug['state'] in ('merged', 'released')),
         'released': sum(1 for bug in alive if bug['state'] == 'released'),
+        'notified': sum(1 for bug in alive if bug.get('notify') == 'sent'),
+        'responded': sum(1 for bug in alive if (bug.get('followUp') or {}).get('state') == 'responded'),
     }
 
 
@@ -201,12 +253,35 @@ def _pr_links(bug):
     return '、'.join(f"[{pr['repo'].split('/')[-1]}#{pr['number']}]({pr['url']})" for pr in bug['prs']) or '–'
 
 
+def notify_label(bug, now):
+    """Bug 明细的回告列：只有已上线的 Bug 有回告进度。"""
+    if bug['state'] != 'released':
+        return '–'
+    if bug.get('notify') == 'pending':
+        return '待回告'
+    if bug.get('notify') == 'skipped':
+        return f"不回告：{bug.get('notifyReason') or '原因未填'}"
+    follow = bug.get('followUp') or {}
+    state = follow.get('state')
+    left = f"（剩 {max(0, (_parse(follow['deadline']) - now).days)} 天）" if follow.get('deadline') else ''
+    if state == 'responded':
+        return f"客户有回应（{_parse(follow['respondedAt']).astimezone(TZ):%m-%d}）"
+    if state == 'expired':
+        return 'CS 已告知，客户无回应（已截止）' if follow.get('csInformedAt') else 'CS 未告知客户（已截止）'
+    return {'untracked': '已回告（Facebook 不跟踪回应）', 'not_integrated': '已回告（回应识别未接入）',
+            'unread': '已回告（会话读取失败）', 'awaiting_cs': f'已回告，待 CS 告知客户{left}',
+            'cs_informed': f'CS 已告知，待客户回应{left}'}.get(state, '已回告')
+
+
 def attention(board, now):
-    items = {'notify': [], 'merged': [], 'review': [], 'pr_closed': [], 'unrejectable': [], 'fixing': []}
+    items = {'notify': [], 'responded': [], 'merged': [], 'review': [], 'pr_closed': [], 'unrejectable': [], 'fixing': []}
     for bug in board['bugs']:
         state = bug['state']
+        follow = bug.get('followUp') or {}
         if state == 'released' and bug.get('notify') == 'pending':
             items['notify'].append((bug, None))
+        elif follow.get('state') == 'responded' and now - _parse(follow['respondedAt']) <= dt.timedelta(days=1):
+            items['responded'].append((bug, None))
         elif state == 'merged':
             merged = max((pr['mergedAt'] for pr in bug['prs'] if pr.get('mergedAt')), default=None)
             items['merged'].append((bug, _age(merged, now)))
@@ -221,7 +296,7 @@ def attention(board, now):
 
 
 ATTENTION_TITLES = {
-    'notify': '已上线待回告', 'merged': '已合并待上线', 'review': '待审 PR', 'pr_closed': 'PR 已关闭未合并且未标 🚫',
+    'notify': '已上线待回告', 'responded': '已回告有新回应', 'merged': '已合并待上线', 'review': '待审 PR', 'pr_closed': 'PR 已关闭未合并且未标 🚫',
     'fixing': '已确认尚无 PR', 'unrejectable': '无交付消息，无法用 🚫 标注',
 }
 
@@ -248,7 +323,7 @@ def render_markdown(board, now):
             intake = [_num(row['collected'], scanned), _suspected(row, scanned)]
         cells = [row['label'], *intake]
         cells += [str(row[key]) for key in ('confirmed', 'rejected', 'shouldShip', 'delivered', 'merged', 'released')]
-        cells += ['–', '–']
+        cells += [str(row['notified']), str(row['responded'])]
         if bold:
             cells = [f'**{cell}**' for cell in cells]
         return '| ' + ' | '.join(cells) + ' |'
@@ -260,8 +335,8 @@ def render_markdown(board, now):
                + ('' if row['coverageComplete'] else '（来源覆盖不完整）')
                for row in board['rows'] if isinstance(row.get('collectedBySource'), dict)]
     lines += ['', '来源拆分：' + ('；'.join(sources) or '–'),
-              '「已回告」「用户回应」尚未接入（阶段 3）。', '', '### Bug 明细', '',
-              '| Bug | 反馈日 | 来源 | 问题 | PR | 状态 |', '|---|---|---|---|---|---|']
+              '', '### Bug 明细', '',
+              '| Bug | 反馈日 | 来源 | 问题 | PR | 状态 | 回告 |', '|---|---|---|---|---|---|---|']
     for bug in board['bugs']:
         state = STATE_LABELS[bug['state']]
         if bug['state'] == 'released':
@@ -271,11 +346,13 @@ def render_markdown(board, now):
             state += f"：{bug['rejection'].get('reason') or '原因未填'}"
         source = f"[{bug['source']}]({bug['sourceUrl']})" if bug.get('sourceUrl') else bug['source']
         lines.append(f"| [{bug['identifier']}]({bug['url']}) | {bug['feedbackDate']} | {source} | "
-                     f"{bug['summary']} | {_pr_links(bug)} | {state} |")
+                     f"{bug['summary']} | {_pr_links(bug)} | {state} | {notify_label(bug, now)} |")
     lines += ['', '### 需要关注', ''] + (attention_notes(board, now) or ['- 无'])
     lines += ['', '### 数据说明', ''] + [f'- {warning}' for warning in board['warnings']] + [
         '- 已上线：PR 合并提交已包含在「Release to PRODUCTION」成功运行的 release 标签中；无该流程的仓库合并即视为就绪。',
-        '- 不上线：审查人在 Bug 交付 thread 上点 🚫；原因取其以 🚫 开头的最新回复。']
+        '- 不上线：审查人在 Bug 交付 thread 上点 🚫；原因取其以 🚫 开头的最新回复。',
+        f'- 已回告：台账有发送记录；用户回应：Intercom 须 CS 回复确实告知客户已修复上线后，客户再有消息才算。'
+        f'从回告起跟踪 {FOLLOW_UP_DAYS} 天；Facebook 不跟踪回应，Canny 尚未接入。']
     return '\n'.join(lines) + '\n'
 
 
@@ -313,10 +390,12 @@ def render_slack(board, now, board_link=None):
     lines.append(f"**Bug 现状**（共 {len(board['bugs'])} 个" + (f"，含试运行 {trial} 个）" if trial else '）'))
     lines += status_lines(board, now) or ['- 暂无']
     items = attention(board, now)
-    if items['notify']:
-        lines.append(attention_line('notify', items['notify']))
+    for key in ('notify', 'responded'):
+        if items[key]:
+            lines.append(attention_line(key, items[key]))
     total = board['total']
-    lines += ['', f"**累计（{board['start'][5:]} 起{total['excludedNote']}）**：{intake(total)} · 已上线 {total['released']} 个"]
+    lines += ['', f"**累计（{board['start'][5:]} 起{total['excludedNote']}）**：{intake(total)} · 已上线 {total['released']} 个"
+              f" · 已回告 {total['notified']} 个 · 客户回应 {total['responded']} 个"]
     unrejectable = items['unrejectable']
     notes = [f'- {warning}' for warning in board['warnings']]
     if unrejectable:
@@ -405,7 +484,32 @@ def slack_thread(cli, permalink):
         return json.loads(output.read_text())['messages']
 
 
-def collect(args):
+def intercom_parts(cli, url):
+    """经 intercom skill 读取会话消息（客户、客服、机器人消息的类型、时间与正文）；读取失败返回 None。"""
+    if not url:
+        return None
+    try:
+        return run_json(['uv', 'run', '-q', '--script', cli, 'get-conversation', url])['parts']
+    except (subprocess.CalledProcessError, json.JSONDecodeError, KeyError):
+        return None
+
+
+def follow_up_tasks(bugs):
+    """取出看板 Agent 要处理的事项：待判断是否已告知客户的 CS 回复、待写入台账的回应记录。
+    会话原文只留在这里，不进入 Bug 明细。"""
+    judge, record = [], []
+    for bug in bugs:
+        follow = bug.get('followUp') or {}
+        candidates, base = follow.pop('candidates', None), follow.pop('record', None)
+        if candidates:
+            judge.append({'issue': bug['identifier'], 'summary': bug['summary'], 'conversation': bug['sourceUrl'],
+                          'record': base, 'candidates': candidates})
+        if 'proposal' in follow:
+            record.append(follow.pop('proposal'))
+    return {'judge': judge, 'record': record}
+
+
+def collect(args, now):
     scans, bugs = [], []
     github = GitHub()
     start = dt.date.fromisoformat(args.start)
@@ -432,7 +536,15 @@ def collect(args):
             bug['rejection'] = rejection(slack_thread(args.slack_cli, bug['deliveryPermalink']), args.reviewer)
         bug['state'] = bug_state(bug['prs'], bug['rejection'] is not None)
         if bug['state'] == 'released':
-            bug['notify'] = notify_state(ledger.get((issue['identifier'], 'notify')))
+            notify = ledger.get((issue['identifier'], 'notify'))
+            bug['notify'] = notify_state(notify)
+            if bug['notify'] == 'skipped':
+                bug['notifyReason'] = notify.get('reason')
+            if bug['notify'] == 'sent':
+                bug['followUp'] = follow_up(bug['source'], notify, ledger.get((issue['identifier'], 'notify-followup')),
+                                            lambda: intercom_parts(args.intercom_cli, bug['sourceUrl']), now)
+                if bug['followUp']['state'] == 'unread':
+                    warnings.append(f"{issue['identifier']} Intercom 会话读取失败，回应状态未更新")
         bugs.append(bug)
     return scans, bugs, warnings
 
@@ -445,21 +557,25 @@ def main(argv=None):
     parser.add_argument('--today', help='Asia/Shanghai 当天日期，默认取当前时间')
     parser.add_argument('--reviewer', required=True, help='有权用 🚫 标注不上线的 Slack 用户 ID')
     parser.add_argument('--slack-cli', default=os.path.expanduser('~/.agents/skills/slack/scripts/slack.py'))
+    parser.add_argument('--intercom-cli', default=os.path.expanduser('~/.agents/skills/intercom/scripts/intercom.py'))
     parser.add_argument('--issue-url-base', default='https://multica.devops.moego.dev/grm/issues/')
     parser.add_argument('--board-link', help='常驻看板任务链接，附在 Slack 版末尾')
     parser.add_argument('--output-dir', required=True)
     args = parser.parse_args(argv)
     now = dt.datetime.now(dt.timezone.utc)
     today = dt.date.fromisoformat(args.today) if args.today else now.astimezone(TZ).date()
-    scans, bugs, warnings = collect(args)
+    scans, bugs, warnings = collect(args, now)
+    tasks = follow_up_tasks(bugs)
     board = build_board(scans, bugs, dt.date.fromisoformat(args.start), today)
     board['warnings'] = warnings + board['warnings']
+    board['followUpTasks'] = tasks
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
     (output / 'board.json').write_text(json.dumps(board, ensure_ascii=False, indent=2))
     (output / 'board.md').write_text(render_markdown(board, now))
     (output / 'slack.md').write_text(render_slack(board, now, args.board_link))
-    print(json.dumps({'output': str(output), 'warnings': board['warnings']}, ensure_ascii=False))
+    print(json.dumps({'output': str(output), 'warnings': board['warnings'],
+                      'followUpTasks': {key: len(value) for key, value in tasks.items()}}, ensure_ascii=False))
 
 
 if __name__ == '__main__':
