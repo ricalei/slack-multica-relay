@@ -66,6 +66,8 @@ Multica 任务操作一律用原生 CLI：先看帮助，核对服务、GRM 工�
 
 按开发、Git 和验收 Skills 连续实现、增量验证、动态验收与局部修复复验。测试 worker 最多 2，只改本 Bug 所需内容。可先推送草稿 PR 取得测试构建，再确认真实版本完成验收；构建成功不是业务通过。必要数据/环境缺口先沿 Skills 在授权内准备或恢复，真实不可执行才报告阻塞。跨模块需分阶段时遵守目标仓库规则，不降低验收标准。
 
+本工作流不创建 Jira，自动创建的分支、commit message 和 PR 标题需要 Jira key 时一律使用 `GRM-0`。Multica 任务编号（如 `GRM-123`）与 Jira 单号同形但不是 Jira 单号，不得写入分支、commit 或 PR 标题。
+
 ### 构建与测试部署期间持续推进
 
 参考同一 Runtime 中工程 Agent 与 Bug Resolver 的持续验收方式，按 `moe-acceptance/references/repair-and-retest.md` 的「等待构建或部署后续验」执行。目标分支的构建/部署 CI 结果是任务明确要求的验收前置。若已有 Bug 正文遗漏这一要求，按上述已获授权的验收标准用 `--no-start` 补齐并回读，再跟踪其实际构建；不改写 Runtime 自动管理的规则文件。
