@@ -51,6 +51,7 @@ def snapshot(issue, env):
     if run.get("issue_id") != issue or run.get("workspace_id") != identity["MULTICA_WORKSPACE_ID"]:
         raise RunContextError("运行归属不匹配")
     model = None
+    service_tier = None
     agent_id = run.get("agent_id")
     if agent_id:
         try:
@@ -59,6 +60,8 @@ def snapshot(issue, env):
                 candidate = agent.get("model")
                 if isinstance(candidate, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}", candidate.strip()):
                     model = candidate.strip()
+                    if agent.get("service_tier") in ("priority", "default"):
+                        service_tier = agent["service_tier"]
         except RunContextError:
             pass
     try:
@@ -70,6 +73,8 @@ def snapshot(issue, env):
     selected = {key: run[key] for key in ("id", "issue_id", "workspace_id", "agent_id", "started_at", "status") if key in run}
     if model:
         selected.update(model=model, model_source="agent_config")
+    if service_tier:
+        selected.update(service_tier=service_tier, service_tier_source="agent_config")
     return {"version": 1, "scope": identity, "captured_at": captured, "run": selected, "messages": messages}
 
 
@@ -173,6 +178,9 @@ def statistics(data):
     model = data["run"].get("model")
     if isinstance(model, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}", model):
         stats.update(model=model, model_source="agent_config")
+        service_tier = data["run"].get("service_tier")
+        if service_tier in ("priority", "default"):
+            stats.update(service_tier=service_tier, service_tier_source="agent_config")
     messages = valid_messages(data)
     calls = [m for m in messages if m["type"] == "tool_use"]
     if calls:
