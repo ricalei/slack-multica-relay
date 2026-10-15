@@ -82,8 +82,44 @@ Cloudflare 使用 `pnpm dev:cf`、`pnpm build:cf` 和 `pnpm deploy:cf`，共享�
 
 ## 每日值守看板
 
-`scripts/duty-board.py` 只读汇总「GRM 每日 Bug 值守」的反馈日漏斗：读取值守项目任务、字段台账任务 GRM-664 的 `<!-- duty-board:v1 -->` 评论、GitHub PR 与「Release to PRODUCTION」运行（兼容 cherry-pick 发布线），以及 Slack 交付 thread 上审查人的 🚫；已上线 Bug 按台账回告记录判断是否待回告，已回告的 Intercom 来源读取会话跟踪 CS 告知与客户回应（CS 回复是否告知已上线由看板 Agent 判断并记入台账），Canny 来源经 moe-feedback-collector `canny-post` 读取回告后的新评论，由看板 Agent 按语义判断是否为客户回应，输出 `board.json`、`board.md`、`slack.md`。「GRM 每日值守看板」Agent（Prompt 真源 [DUTY-BOARD-PROMPT.md](DUTY-BOARD-PROMPT.md)）由 Autopilot 每天 08:30 运行 `origin/main` 版本，发送到指定交付频道并追加到 GRM-665。本地预览：
+`scripts/duty-board.py` 只读汇总「GRM 每日 Bug 值守」的反馈日漏斗：读取值守项目任务、字段台账任务 GRM-664 的 `<!-- duty-board:v1 -->` 评论、GitHub PR 与「Release to PRODUCTION」运行（兼容 cherry-pick 发布线）、Slack 交付 thread 上审查人的 🚫，以及下节的回告记录与回应跟踪，输出 `board.json`、`board.md`、`slack.md`。「GRM 每日值守看板」Agent（Prompt 真源 [DUTY-BOARD-PROMPT.md](DUTY-BOARD-PROMPT.md)）由 Autopilot 每天 10:00 运行 `origin/main` 版本，发送到指定交付频道并追加到 GRM-665。本地预览：
 
 ```bash
-python3 scripts/duty-board.py --project <值守项目 ID> --ledger-issue GRM-664 --start 2026-10-12 --reviewer <审查人 Slack 用户 ID> --output-dir <输出目录>
+python3 scripts/duty-board.py --project <值守项目 ID> --ledger-issue GRM-664 --start 2026-10-12 --reviewer <审查人 Slack 用户 ID> --canny-account-ref <Canny 内部测试账号 aid> --output-dir <输出目录>
 ```
+
+## 上线回告
+
+Bug 上线后告知反馈方。AI 只起草，每次对外发送都由审查人把关；值守 Agent 起草与发送的执行规则见 [DAILY-BUG-DUTY-PROMPT.md](DAILY-BUG-DUTY-PROMPT.md) 第 4 节，看板 Agent 的回应判断见 [DUTY-BOARD-PROMPT.md](DUTY-BOARD-PROMPT.md)。
+
+**流程与分工。** 看板把已上线、未标 🚫 且台账无回告记录的 Bug 列为「已上线待回告」。审查人在该 Bug 的 Multica 任务评论以下首行指令，唤醒值守 Agent；这些评论不算返工，不动修复队列。
+
+| 首行评论 | 值守 Agent 的动作 |
+|---|---|
+| `回告` | 核对已上线后起草英文回告，以 Bot 回复到该 Bug 的 Slack 交付 thread，不 @ 任何人；第二行起可写起草要求 |
+| `确认发布` | 仅 Intercom：以审查人 Slack 身份把已审核草稿原文私信给 CS，英文验收报告附在私信 thread；第二行可附私信链接 |
+| `已回告` | 审查人已自行发送（Canny、Facebook 原帖留言），只记台账 |
+| `不回告` | 其后写原因，只记台账 |
+
+| 来源 | 回告对象与形式 | 发送人 |
+|---|---|---|
+| Intercom | 处理该会话的 CS（intercom skill `get-teammates` 的主要客服，按邮箱经 slack skill `resolve` 找到 Slack 用户）；草稿为给 CS 的英文私信，附英文版验收报告 | `确认发布` 后由 Agent 以审查人身份私信 |
+| Canny | 原帖下的英文留言 | 审查人自行发送 |
+| Facebook | 原帖下的英文留言；只能读 Slack 汇总消息，原帖由审查人自行找到 | 审查人自行发送 |
+
+私信会话用审查人提供的链接，或用审查人 token 搜索与该 CS 的已有私信；审查人 token 不能新开私信，搜不到时请审查人在 Slack 打开私信后附链接。
+
+**台账记录。** GRM-664 按「任务编号 + kind」各取最新一条：
+
+| kind | 写入方 | 写入时机与字段 |
+|---|---|---|
+| `notify` | 值守 Agent | `确认发布`、`已回告`、`不回告` 完成后：`state`（`sent` / `skipped`）、`at`（发送或标记时间，回应跟踪起点）、`via`、`message`、`cs`、`reason`。起草不写台账 |
+| `notify-followup` | 看板 Agent | 回应判断后：`notifyAt`（对应的回告时间）、`judgedThrough`（已判断到的内容时间）、`respondedAt`；Intercom 另有 `csInformedAt`、`csInformedPartId`，Canny 另有 `baselineScore`、`respondedCommentId` |
+
+**回应识别。** 看板从 `notify.at` 起跟踪 14 天，识别到客户回应或到期后不再读取来源：
+
+- Intercom：看板 Agent 判断回告后 CS 的新公开回复是否明确告诉客户问题已修复上线；判定告知后，客户再有消息才算回应。
+- Canny：经 moe-feedback-collector `canny-post --include-text` 以内部测试账号只读读取帖子；回告后的新公开评论由看板 Agent 按语义判断是否为客户回应（我方留言、员工跟帖不算）。首次跟踪记录票数基准，票数变化只作参考。
+- Facebook：不跟踪回应。
+
+**看板展示。** 漏斗「已回告」「用户回应」两列；Bug 明细「回告」列显示待回告、不回告、待 CS 告知客户、待客户回应（Canny 附票数变化）、客户有回应、已截止；「需要关注」与 Slack 版列出「已上线待回告」和近 1 天的「已回告有新回应」。
