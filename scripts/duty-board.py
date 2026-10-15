@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -341,20 +342,37 @@ def attention_notes(board, now):
     return [attention_line(key, entries) for key, entries in attention(board, now).items() if entries]
 
 
+FUNNEL_HEADER = ['反馈日', '采集', '疑似候选', '确认 Bug', '不上线', '应上线', '已交付 PR', '已合并', '已上线', '已回告', '用户回应']
+
+
+def funnel_cells(board, row):
+    if row is board['trial']:
+        intake = ['–', '–']
+    else:
+        scanned = row.get('scanned', True)
+        intake = [_num(row['collected'], scanned), _suspected(row, scanned)]
+    cells = [row['label'], *intake]
+    cells += [str(row[key]) for key in ('confirmed', 'rejected', 'shouldShip', 'delivered', 'merged', 'released')]
+    return cells + [str(row['notified']), str(row['responded'])]
+
+
+def bug_status_text(bug):
+    state = STATE_LABELS[bug['state']]
+    if bug['state'] == 'released':
+        tags = '、'.join(sorted({pr['release']['tag'] for pr in bug['prs'] if pr.get('release')}))
+        state += f'（{tags}）'
+    if bug['state'] == 'rejected':
+        state += f"：{bug['rejection'].get('reason') or '原因未填'}"
+    return state
+
+
 def render_markdown(board, now):
-    header = ['反馈日', '采集', '疑似候选', '确认 Bug', '不上线', '应上线', '已交付 PR', '已合并', '已上线', '已回告', '用户回应']
+    header = FUNNEL_HEADER
     lines = [f"## 每日 Bug 值守看板｜截至 {board['through']} 反馈日", '',
              f"生成时间：{now.astimezone(TZ):%Y-%m-%d %H:%M}（Asia/Shanghai）。按反馈日分组，d1 = {board['start']}。", '',
              '### 漏斗', '', '| ' + ' | '.join(header) + ' |', '|' + '---|' * len(header)]
     def row_line(row, bold=False):
-        if row is board['trial']:
-            intake = ['–', '–']
-        else:
-            scanned = row.get('scanned', True)
-            intake = [_num(row['collected'], scanned), _suspected(row, scanned)]
-        cells = [row['label'], *intake]
-        cells += [str(row[key]) for key in ('confirmed', 'rejected', 'shouldShip', 'delivered', 'merged', 'released')]
-        cells += [str(row['notified']), str(row['responded'])]
+        cells = funnel_cells(board, row)
         if bold:
             cells = [f'**{cell}**' for cell in cells]
         return '| ' + ' | '.join(cells) + ' |'
@@ -369,12 +387,7 @@ def render_markdown(board, now):
               '', '### Bug 明细', '',
               '| Bug | 反馈日 | 来源 | 问题 | PR | 状态 | 回告 |', '|---|---|---|---|---|---|---|']
     for bug in board['bugs']:
-        state = STATE_LABELS[bug['state']]
-        if bug['state'] == 'released':
-            tags = '、'.join(sorted({pr['release']['tag'] for pr in bug['prs'] if pr.get('release')}))
-            state += f'（{tags}）'
-        if bug['state'] == 'rejected':
-            state += f"：{bug['rejection'].get('reason') or '原因未填'}"
+        state = bug_status_text(bug)
         source = f"[{bug['source']}]({bug['sourceUrl']})" if bug.get('sourceUrl') else bug['source']
         lines.append(f"| [{bug['identifier']}]({bug['url']}) | {bug['feedbackDate']} | {source} | "
                      f"{bug['summary']} | {_pr_links(bug)} | {state} | {notify_label(bug, now)} |")
@@ -595,6 +608,315 @@ def collect(args, now):
     return scans, bugs, warnings
 
 
+# ---------- HTML 版：Slack thread 附件 ----------
+
+# 扫描任务以固定文件名上传证据索引，单独作为附件或放在证据 zip 内。
+SCAN_INDEX_NAME = 'scan-evidence-index.json'
+SCAN_INDEX_MAX_BYTES = 20 * 1024 * 1024
+# 顺序即页面展示顺序：需要处理的在前，非 Bug 在后。
+RECORD_STATES = {
+    'confirmed': '确认可修', 'verification_blocked': '待验证/验证受阻', 'duplicate': '重复',
+    'cs_followed': '已有工单跟进', 'excluded_after_investigation': '调查后排除',
+    'product_decision': '产品/设计诉求', 'non_bug': '普通支持',
+}
+RECORD_DETAILS = (('unresolvedGap', '待确认缺口'), ('resumeCondition', '恢复条件'),
+                  ('correctBehaviorBasis', '正确行为依据'), ('observation', '动态观察'),
+                  ('verificationMethod', '验证方式'))
+TICKET_KEY = re.compile(r'[A-Z][A-Z0-9]{1,9}-\d+')
+
+
+def _https(value):
+    return value if isinstance(value, str) and re.match(r'https?://', value) else ''
+
+
+def _clip(value, limit):
+    return value[:limit] if isinstance(value, str) else ''
+
+
+def _attempt_text(attempt):
+    """结构化尝试只取路径与结果；查询语句可能带商家 ID，不进入页面。"""
+    if isinstance(attempt, str):
+        return _clip(attempt, 600)
+    if not isinstance(attempt, dict):
+        return ''
+    parts = [attempt.get('path') or attempt.get('method'), attempt.get('result')]
+    return _clip('：'.join(str(part) for part in parts if part), 600)
+
+
+def scan_records(index):
+    """证据索引 → 页面逐条记录。只保留排查与判断字段，不带商家 ID、客户分层与查询语句。"""
+    records = []
+    for record in index.get('records') or []:
+        if not isinstance(record, dict):
+            continue
+        tickets = [key for key in (record.get('csTickets') or []) + (record.get('verifiedJiraKeys') or [])
+                   if isinstance(key, str) and TICKET_KEY.fullmatch(key)]
+        records.append({
+            'state': _clip(record.get('state'), 60), 'source': _clip(record.get('source'), 30),
+            'summary': _clip(record.get('summary') or record.get('title') or record.get('evidenceId'), 240),
+            'reason': _clip(record.get('reason'), 600), 'sourceUrl': _https(record.get('sourceUrl')),
+            'details': [[label, _clip(record[key], 600)] for key, label in RECORD_DETAILS
+                        if isinstance(record.get(key), str) and record[key]],
+            'attempts': [text for text in map(_attempt_text, (record.get('attempts') or [])[:12]) if text],
+            'tickets': list(dict.fromkeys(tickets)),
+            'pr': _https(record.get('relatedPR') or record.get('pr')),
+        })
+    rank = {state: index for index, state in enumerate(RECORD_STATES)}
+    return sorted(records, key=lambda record: rank.get(record['state'], len(rank)))
+
+
+def read_scan_index(path):
+    if path.name == SCAN_INDEX_NAME:
+        return json.loads(path.read_text())
+    with zipfile.ZipFile(path) as archive:
+        # 只读取同名索引，不解压其它文件；超限的成员视为不可用。
+        members = [member for member in archive.infolist()
+                   if Path(member.filename).name == SCAN_INDEX_NAME and member.file_size <= SCAN_INDEX_MAX_BYTES]
+        return json.loads(archive.read(members[0])) if members else None
+
+
+def load_scan_index(identifier):
+    """取扫描任务最新上传的证据索引；找不到返回 None。"""
+    comments = run_json(['multica', 'issue', 'comment', 'list', identifier, '--output', 'json'])
+    comments = comments if isinstance(comments, list) else comments.get('comments', [])
+    attachments = [attachment for comment in sorted(comments, key=lambda item: item['created_at'], reverse=True)
+                   for attachment in comment.get('attachments') or []]
+    with tempfile.TemporaryDirectory() as directory:
+        for attachment in attachments:
+            name = attachment.get('filename') or ''
+            if name != SCAN_INDEX_NAME and not name.endswith('.zip'):
+                continue
+            subprocess.run(['multica', 'attachment', 'download', attachment['id'], '-o', directory],
+                           check=True, capture_output=True, text=True)
+            index = read_scan_index(Path(directory) / name)
+            if index is not None:
+                return index
+    return None
+
+
+def yesterday_scan(board, scans):
+    """昨日反馈日最新一次扫描的逐条记录；没有扫描或索引不可用时返回原因供页面说明。"""
+    candidates = [scan for scan in scans if scan.get('feedbackDate') == board['through']]
+    if not candidates:
+        return None, f"{board['through']} 反馈日尚未扫描，暂无逐条记录。"
+    scan = max(candidates, key=lambda item: item['createdAt'])
+    try:
+        index = load_scan_index(scan['identifier'])
+    except (subprocess.CalledProcessError, OSError, ValueError, zipfile.BadZipFile):
+        index = None
+    if not index or index.get('targetDate') not in (None, board['through']):
+        return None, f"{scan['identifier']} 没有可用的证据索引（{SCAN_INDEX_NAME}），暂无逐条记录。"
+    return {'identifier': scan['identifier'], 'records': scan_records(index)}, None
+
+
+def html_payload(board, now, scan, scan_note, board_link=None, issue_url_base=''):
+    rows = ([board['trial']] if board['trial'] else []) + board['rows'] + [board['total']]
+    bugs = [{
+        'identifier': bug['identifier'], 'url': _https(bug['url']), 'summary': bug['summary'],
+        'feedbackDate': bug['feedbackDate'], 'source': bug.get('source') or '', 'sourceUrl': _https(bug.get('sourceUrl')),
+        'prs': [{'label': f"{pr['repo'].split('/')[-1]}#{pr['number']}", 'url': _https(pr['url'])} for pr in bug['prs']],
+        'state': bug['state'], 'status': bug_status_text(bug), 'notify': notify_label(bug, now),
+    } for bug in board['bugs']]
+    attention_groups = [{'title': ATTENTION_TITLES[key], 'items': [
+        {'identifier': bug['identifier'], 'url': _https(bug['url']), 'note': note or ''} for bug, note in entries]}
+        for key, entries in attention(board, now).items() if entries]
+    return {
+        'through': board['through'], 'start': board['start'],
+        'generatedAt': f'{now.astimezone(TZ):%Y-%m-%d %H:%M}', 'boardLink': _https(board_link),
+        'header': FUNNEL_HEADER, 'funnel': [funnel_cells(board, row) for row in rows],
+        'latest': board['rows'][-1] if board['rows'] else None, 'total': board['total'],
+        'bugs': bugs, 'attention': attention_groups, 'warnings': board['warnings'],
+        'scan': scan and {**scan, 'url': _https(issue_url_base + scan['identifier'])},
+        'scanNote': scan_note, 'stateNames': RECORD_STATES,
+    }
+
+
+def render_html(payload):
+    # 数据以 JSON 内嵌，页面脚本只用 textContent 渲染；转义 < 与行分隔符，防止记录正文提前闭合 script。
+    data = (json.dumps(payload, ensure_ascii=False).replace('<', '\\u003c')
+            .replace('\u2028', '\\u2028').replace('\u2029', '\\u2029'))
+    title = f"每日 Bug 值守看板｜截至 {payload['through'][5:]}"
+    return HTML_TEMPLATE.replace('__TITLE__', title).replace('__DATA__', data)
+
+
+HTML_TEMPLATE = r'''<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--text:#1d2129;--muted:#6b7280;--line:#e5e7eb;--accent:#2563eb;--soft:#eef2ff;
+--green:#16a34a;--amber:#d97706;--red:#dc2626;--gray:#9ca3af}
+@media (prefers-color-scheme:dark){:root{--bg:#111318;--card:#1a1d24;--text:#e5e7eb;--muted:#9aa1ad;--line:#2b303a;
+--accent:#60a5fa;--soft:#1e2a44}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Segoe UI",sans-serif}
+main{max-width:1180px;margin:0 auto;padding:24px 16px 48px}
+h1{font-size:22px;margin:0 0 4px}h2{font-size:16px;margin:0 0 12px}
+.sub{color:var(--muted);font-size:13px}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+section{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-top:16px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-top:16px}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}
+.kpi .label{color:var(--muted);font-size:12px}.kpi .value{font-size:26px;font-weight:600;margin-top:2px}
+.kpi .hint{color:var(--muted);font-size:12px}
+.scroll{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;white-space:nowrap}
+td.wrap{white-space:normal;min-width:180px}
+th{color:var(--muted);font-weight:500}
+tr.total td{font-weight:600}
+.badge{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;background:var(--soft)}
+.s-released{color:var(--green)}.s-merged,.s-review{color:var(--amber)}.s-rejected,.s-pr_closed{color:var(--red)}
+.bars{display:flex;flex-direction:column;gap:6px}
+.bar{display:grid;grid-template-columns:130px 1fr 56px;gap:10px;align-items:center;cursor:pointer;border-radius:6px;padding:2px 4px}
+.bar:hover,.bar.on{background:var(--soft)}
+.track{height:10px;background:var(--line);border-radius:999px;overflow:hidden}
+.fill{height:100%;background:var(--accent)}
+.toolbar{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
+input,select,button{font:inherit;color:inherit;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:6px 10px}
+input{flex:1;min-width:200px}button{cursor:pointer}button:disabled{opacity:.4;cursor:default}
+.record{border-top:1px solid var(--line);padding:10px 2px}
+.record summary{cursor:pointer;list-style:none}.record summary::-webkit-details-marker{display:none}
+.meta{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:12px;color:var(--muted)}
+.title{font-weight:500;margin:2px 0}
+.reason{color:var(--muted);font-size:13px}
+.detail{margin:8px 0 0 0;padding-left:12px;border-left:2px solid var(--line);font-size:13px}
+.detail div{margin:4px 0}.detail b{color:var(--muted);font-weight:500;margin-right:6px}
+.pager{display:flex;gap:8px;align-items:center;justify-content:flex-end;margin-top:10px;color:var(--muted)}
+ul.plain{margin:0;padding-left:18px}
+.empty{color:var(--muted)}
+</style>
+</head>
+<body>
+<main id="app"></main>
+<script id="board-data" type="application/json">__DATA__</script>
+<script>
+(function () {
+  const data = JSON.parse(document.getElementById('board-data').textContent);
+  const app = document.getElementById('app');
+  function el(tag, attrs, children) {
+    const node = document.createElement(tag);
+    Object.entries(attrs || {}).forEach(([key, value]) => {
+      if (value === null || value === undefined || value === '') return;
+      if (key === 'text') node.textContent = value; else node.setAttribute(key, value);
+    });
+    (children || []).forEach(child => { if (child) node.append(typeof child === 'string' ? document.createTextNode(child) : child); });
+    return node;
+  }
+  function link(text, url) { return /^https?:\/\//.test(url || '') ? el('a', {href: url, target: '_blank', rel: 'noopener', text}) : el('span', {text}); }
+  function section(title, children) { return el('section', {}, [el('h2', {text: title}), ...children]); }
+  function num(value, scanned) { return scanned === false ? '未扫描' : (value === null || value === undefined ? '缺失' : String(value)); }
+
+  const header = el('header', {}, [
+    el('h1', {text: `每日 Bug 值守看板｜截至 ${data.through.slice(5)}`}),
+    el('div', {class: 'sub'}, [`生成时间 ${data.generatedAt}（Asia/Shanghai）· d1 = ${data.start}`,
+      data.boardLink ? ' · ' : '', data.boardLink ? link('Multica 常驻看板', data.boardLink) : null]),
+  ]);
+  app.append(header);
+
+  const latest = data.latest, total = data.total;
+  if (latest) {
+    const estimated = latest.suspectedEstimated && latest.suspected !== null ? '约 ' : '';
+    app.append(el('div', {class: 'kpis'}, [
+      ['昨日采集', num(latest.collected, latest.scanned), `${latest.date.slice(5)} 反馈日`],
+      ['昨日疑似候选', latest.scanned === false ? '未扫描' : estimated + num(latest.suspected), '需要调查的反馈'],
+      ['昨日确认 Bug', String(latest.confirmed), '进入修复'],
+      ['累计确认 Bug', String(total.confirmed), `已上线 ${total.released} · 已回告 ${total.notified}`],
+    ].map(([label, value, hint]) => el('div', {class: 'kpi'}, [
+      el('div', {class: 'label', text: label}), el('div', {class: 'value', text: value}), el('div', {class: 'hint', text: hint})]))));
+  }
+
+  if (data.attention.length || data.warnings.length) {
+    const items = data.attention.map(group => el('li', {}, [`${group.title} ${group.items.length}：`,
+      ...group.items.flatMap((item, i) => [i ? '、' : '', link(item.identifier, item.url), item.note ? `（${item.note}）` : ''])]));
+    data.warnings.forEach(text => items.push(el('li', {text})));
+    app.append(section('需要关注', [el('ul', {class: 'plain'}, items)]));
+  }
+
+  const funnel = el('table', {}, [el('thead', {}, [el('tr', {}, data.header.map(text => el('th', {text})))]),
+    el('tbody', {}, data.funnel.map((cells, i) => el('tr', {class: i === data.funnel.length - 1 ? 'total' : ''},
+      cells.map(text => el('td', {text})))))]);
+  app.append(section('漏斗', [el('div', {class: 'scroll'}, [funnel])]));
+
+  const bugRows = data.bugs.map(bug => el('tr', {}, [
+    el('td', {}, [link(bug.identifier, bug.url)]), el('td', {text: bug.feedbackDate}),
+    el('td', {}, [link(bug.source || '–', bug.sourceUrl)]), el('td', {class: 'wrap', text: bug.summary}),
+    el('td', {class: 'wrap'}, bug.prs.length ? bug.prs.flatMap((pr, i) => [i ? '、' : '', link(pr.label, pr.url)]) : ['–']),
+    el('td', {class: 'wrap'}, [el('span', {class: `badge s-${bug.state}`, text: bug.status})]),
+    el('td', {class: 'wrap', text: bug.notify}),
+  ]));
+  app.append(section('Bug 明细', [el('div', {class: 'scroll'}, [el('table', {}, [
+    el('thead', {}, [el('tr', {}, ['Bug', '反馈日', '来源', '问题', 'PR', '状态', '回告'].map(text => el('th', {text})))]),
+    el('tbody', {}, bugRows.length ? bugRows : [el('tr', {}, [el('td', {class: 'empty', text: '暂无 Bug'})])])])])]));
+
+  const scanSection = section(`昨日逐条记录（${data.through.slice(5)} 反馈日）`, []);
+  app.append(scanSection);
+  if (!data.scan) { scanSection.append(el('p', {class: 'empty', text: data.scanNote || '暂无逐条记录。'})); return; }
+  const records = data.scan.records;
+  scanSection.append(el('div', {class: 'sub'}, [`共 ${records.length} 条，来自 `, link(data.scan.identifier, data.scan.url),
+    '。待验证不等于没有 Bug；点击分类可筛选，点击记录展开判断依据。']));
+  const counts = {};
+  records.forEach(record => { counts[record.state] = (counts[record.state] || 0) + 1; });
+  const order = Object.keys(data.stateNames).concat(Object.keys(counts).filter(key => !(key in data.stateNames)));
+  const state = {query: '', category: '', source: '', page: 0};
+  const bars = el('div', {class: 'bars'});
+  order.filter(key => counts[key]).forEach(key => {
+    const bar = el('div', {class: 'bar', 'data-key': key}, [el('span', {text: data.stateNames[key] || key}),
+      el('div', {class: 'track'}, [el('div', {class: 'fill', style: `width:${(counts[key] / records.length * 100).toFixed(1)}%`})]),
+      el('span', {text: String(counts[key])})]);
+    bar.addEventListener('click', () => { state.category = state.category === key ? '' : key; state.page = 0; draw(); });
+    bars.append(bar);
+  });
+  const search = el('input', {type: 'search', placeholder: '搜索摘要、原因或工单号'});
+  const sources = el('select', {}, [el('option', {value: '', text: '全部来源'}),
+    ...[...new Set(records.map(record => record.source))].sort().map(source => el('option', {value: source, text: source}))]);
+  search.addEventListener('input', () => { state.query = search.value.trim().toLowerCase(); state.page = 0; draw(); });
+  sources.addEventListener('change', () => { state.source = sources.value; state.page = 0; draw(); });
+  const list = el('div'), pager = el('div', {class: 'pager'});
+  scanSection.append(el('div', {style: 'margin:12px 0'}, [bars]), el('div', {class: 'toolbar'}, [search, sources]), list, pager);
+  const PAGE = 30;
+  function matches(record) {
+    if (state.category && record.state !== state.category) return false;
+    if (state.source && record.source !== state.source) return false;
+    if (!state.query) return true;
+    return [record.summary, record.reason, ...record.tickets].join(' ').toLowerCase().includes(state.query);
+  }
+  function card(record) {
+    const meta = el('div', {class: 'meta'}, [el('span', {class: 'badge', text: data.stateNames[record.state] || record.state}),
+      el('span', {text: record.source}), record.sourceUrl ? link('原反馈', record.sourceUrl) : null,
+      ...record.tickets.map(ticket => el('span', {class: 'badge', text: ticket})), record.pr ? link('关联 PR', record.pr) : null]);
+    const body = [...record.details.map(([label, text]) => el('div', {}, [el('b', {text: label}), text])),
+      ...(record.attempts.length ? [el('div', {}, [el('b', {text: '已做尝试'}),
+        el('ul', {class: 'plain'}, record.attempts.map(text => el('li', {text})))])] : [])];
+    const head = el('summary', {}, [meta, el('div', {class: 'title', text: record.summary}),
+      record.reason ? el('div', {class: 'reason', text: record.reason}) : null]);
+    return body.length ? el('details', {class: 'record'}, [head, el('div', {class: 'detail'}, body)])
+      : el('div', {class: 'record'}, [meta, el('div', {class: 'title', text: record.summary}),
+        record.reason ? el('div', {class: 'reason', text: record.reason}) : null]);
+  }
+  function draw() {
+    bars.querySelectorAll('.bar').forEach(bar => bar.classList.toggle('on', bar.dataset.key === state.category));
+    const hits = records.filter(matches);
+    const pages = Math.max(1, Math.ceil(hits.length / PAGE));
+    state.page = Math.min(state.page, pages - 1);
+    list.replaceChildren(...(hits.length ? hits.slice(state.page * PAGE, (state.page + 1) * PAGE).map(card)
+      : [el('p', {class: 'empty', text: '没有匹配的记录。'})]));
+    const prev = el('button', {text: '上一页'}), next = el('button', {text: '下一页'});
+    prev.disabled = state.page === 0; next.disabled = state.page >= pages - 1;
+    prev.addEventListener('click', () => { state.page -= 1; draw(); });
+    next.addEventListener('click', () => { state.page += 1; draw(); });
+    pager.replaceChildren(`${hits.length} 条 · 第 ${state.page + 1}/${pages} 页`, prev, next);
+  }
+  draw();
+})();
+</script>
+</body>
+</html>
+'''
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--project', required=True, help='每日 Bug 值守项目 ID')
@@ -623,6 +945,9 @@ def main(argv=None):
     (output / 'board.json').write_text(json.dumps(board, ensure_ascii=False, indent=2))
     (output / 'board.md').write_text(render_markdown(board, now))
     (output / 'slack.md').write_text(render_slack(board, now, args.board_link))
+    scan, scan_note = yesterday_scan(board, scans)
+    (output / 'board.html').write_text(
+        render_html(html_payload(board, now, scan, scan_note, args.board_link, args.issue_url_base)))
     print(json.dumps({'output': str(output), 'warnings': board['warnings'],
                       'followUpTasks': {key: len(value) for key, value in tasks.items()}}, ensure_ascii=False))
 
