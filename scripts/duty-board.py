@@ -211,13 +211,18 @@ def build_board(scans, bugs, start, today):
         day += dt.timedelta(days=1)
     trial_bugs = [bug for bug in bugs if bug['feedbackDate'] < start.isoformat()]
     trial = {'label': '试运行（回溯）', 'collected': None, 'suspected': None, **_layers(trial_bugs)} if trial_bugs else None
+    # 扫描晚于看板或当日扫描失败时该反馈日未扫描；累计只合计已扫描的反馈日并注明排除项，
+    # 避免一天未扫描就让整列累计显示缺失。已扫描但台账缺字段仍按缺失处理。
+    scanned_rows = [row for row in rows if row['scanned']]
+    unscanned = [row['date'] for row in rows if not row['scanned']]
     def total_of(key):
-        values = [row[key] for row in rows]
+        values = [row[key] for row in scanned_rows]
         return sum(values) if values and all(isinstance(value, int) for value in values) else None
     in_window = [bug for bug in bugs if start.isoformat() <= bug['feedbackDate'] <= yesterday.isoformat()]
-    total = {'label': f'累计（d1–d{len(rows)}）', 'collected': total_of('collected'),
+    excluded = f"，不含未扫描 {'、'.join(date[5:] for date in unscanned)}" if unscanned else ''
+    total = {'label': f'累计（d1–d{len(rows)}{excluded}）', 'collected': total_of('collected'),
              'suspected': total_of('suspected'), 'suspectedEstimated': any(row['suspectedEstimated'] for row in rows),
-             **_layers(in_window)}
+             'unscanned': unscanned, 'excludedNote': excluded, **_layers(in_window)}
     warnings = [warning for scan in latest_scan.values() for warning in scan_warnings(scan)]
     return {'start': start.isoformat(), 'through': yesterday.isoformat(), 'rows': rows, 'trial': trial,
             'total': total, 'bugs': sorted(bugs, key=lambda bug: (bug['feedbackDate'], bug['identifier'])),
@@ -389,7 +394,7 @@ def render_slack(board, now, board_link=None):
         if items[key]:
             lines.append(attention_line(key, items[key]))
     total = board['total']
-    lines += ['', f"**累计（{board['start'][5:]} 起）**：{intake(total)} · 已上线 {total['released']} 个"
+    lines += ['', f"**累计（{board['start'][5:]} 起{total['excludedNote']}）**：{intake(total)} · 已上线 {total['released']} 个"
               f" · 已回告 {total['notified']} 个 · 客户回应 {total['responded']} 个"]
     unrejectable = items['unrejectable']
     notes = [f'- {warning}' for warning in board['warnings']]
