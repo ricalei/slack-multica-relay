@@ -143,7 +143,17 @@ class BoardTests(unittest.TestCase):
         board = board_module.build_board(scans, [], dt.date(2026, 10, 12), dt.date(2026, 10, 14))
         self.assertEqual(board['rows'][0]['collected'], 3)
         self.assertFalse(board['rows'][1]['scanned'])
+        self.assertEqual(board['total']['collected'], 3)
+        self.assertEqual(board['total']['label'], '累计（d1–d2，不含未扫描 10-13）')
+        slack = board_module.render_slack(board, NOW)
+        self.assertIn('**累计（10-12 起，不含未扫描 10-13）**：采集 3 条', slack)
+
+    def test_scanned_day_missing_ledger_field_keeps_total_missing(self):
+        scans = [{'identifier': 'S1', 'feedbackDate': '2026-10-12', 'createdAt': 'a', 'collected': {'canny': 2}},
+                 {'identifier': 'S2', 'feedbackDate': '2026-10-13', 'createdAt': 'b'}]
+        board = board_module.build_board(scans, [], dt.date(2026, 10, 12), dt.date(2026, 10, 14))
         self.assertIsNone(board['total']['collected'])
+        self.assertEqual(board['total']['unscanned'], [])
 
     def test_scan_sums_must_match(self):
         scan = {'identifier': 'S1', 'collected': {'canny': 10}, 'nonBug': 5, 'productDecision': 1, 'csFollowed': 1,
