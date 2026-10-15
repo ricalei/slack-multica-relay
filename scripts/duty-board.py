@@ -748,6 +748,23 @@ def html_payload(board, now, scan, scan_note, board_link=None, issue_url_base=''
     }
 
 
+def html_date_payloads(board, scans, now, board_link=None, issue_url_base=''):
+    """按反馈日内置视图；历史日期限制反馈范围，进度仍采用生成时的最新状态。"""
+    payloads = []
+    for date in [row['date'] for row in board['rows']] or [board['through']]:
+        view = board
+        if date != board['through']:
+            view = build_board([scan for scan in scans if scan['feedbackDate'] <= date],
+                               [bug for bug in board['bugs'] if bug['feedbackDate'] <= date],
+                               dt.date.fromisoformat(board['start']),
+                               dt.date.fromisoformat(date) + dt.timedelta(days=1))
+            # 全局读取告警也必须可见，不因切换日期隐藏数据问题。
+            view['warnings'] = board['warnings']
+        scan, note = yesterday_scan(view, scans)
+        payloads.append(html_payload(view, now, scan, note, board_link, issue_url_base))
+    return payloads
+
+
 def _h(value):
     return escape(str(value), quote=True)
 
@@ -782,7 +799,7 @@ def _html_funnel(payload):
     latest, scan = (payload['rows'] or [None])[-1], payload['scan']
     if not latest or not latest['scanned']:
         body = f'<p class="empty">{_h(payload["through"])} 反馈日尚未扫描，扫描完成后的看板会显示漏斗。</p>'
-        return f'<section class="widget"><div class="head"><h2>昨日漏斗</h2></div>{body}</section>'
+        return f'<section class="widget"><div class="head"><h2>当日漏斗</h2></div>{body}</section>'
     sources = latest.get('collectedBySource') or {}
     split = ' · '.join(f'{_h(name.capitalize())} {count}' for name, count in
                        sorted(sources.items(), key=lambda item: -item[1]))
@@ -795,7 +812,7 @@ def _html_funnel(payload):
     counts = _record_counts(payload)
     foot = ''.join(f'<span>{_h(RECORD_STATES.get(state, state))} <b>{counts[state]}</b></span>'
                    for state in RECORD_STATES if state != 'confirmed' and counts.get(state))
-    return (f'<section class="widget"><div class="head"><h2>昨日漏斗</h2><p>{source}{coverage}</p></div>'
+    return (f'<section class="widget"><div class="head"><h2>当日漏斗</h2><p>{source}{coverage}</p></div>'
             f'<div class="flow">{flow}</div>' + (f'<div class="foot">{foot}</div>' if foot else '') + '</section>')
 
 
@@ -871,7 +888,7 @@ def _html_record(record):
 
 def _html_records(payload):
     scan = payload['scan']
-    title = '<div class="head"><h2>昨日逐条记录</h2>'
+    title = '<div class="head"><h2>当日逐条记录</h2>'
     if not scan:
         return f'<section class="widget full">{title}</div><p class="empty">{_h(payload["scanNote"] or "暂无逐条记录。")}</p></section>'
     records, counts = scan['records'], _record_counts(payload)
@@ -898,13 +915,27 @@ def _html_records(payload):
             f'<div class="pager js-only" id="pager"></div></div></div></section>')
 
 
-def render_html(payload):
-    """静态生成全部内容，不依赖脚本即可阅读；脚本只负责分类切换、搜索与分页。"""
-    title = f"每日 Bug 值守｜{payload['through'][5:]} 反馈日"
-    body = (_html_top(payload) + '<main><div class="wrap"><div class="grid">' + _html_funnel(payload)
+def _html_view(payload):
+    """单个反馈日的完整视图；所有动态文本仍经静态渲染转义。"""
+    return (_html_top(payload) + '<main><div class="wrap"><div class="grid">' + _html_funnel(payload)
             + _html_todo(payload) + '</div>' + _html_bugs(payload) + _html_trend(payload) + _html_records(payload)
             + '<footer>已上线：PR 合并提交包含在「Release to PRODUCTION」成功运行的 release 标签中；无该流程的仓库合并即视为就绪。'
             '不上线：审查人在交付 thread 上点 🚫。</footer></div></main>')
+
+
+def render_html(payload, date_payloads=None):
+    """默认日期静态可读；日期切换、分类、搜索与分页均在本地完成。"""
+    title = f"每日 Bug 值守｜{payload['through'][5:]} 反馈日"
+    views = {item['through']: item for item in date_payloads or []}
+    views[payload['through']] = payload
+    options = ''.join(f'<option value="{_h(date)}"' + (' selected' if date == payload['through'] else '')
+                      + f'>{_h(date)}</option>' for date in sorted(views, reverse=True))
+    picker = ('<div class="wrap date-tools js-only"><label for="feedback-date">反馈日期</label>'
+              f'<select id="feedback-date">{options}</select>'
+              '<span>累计截至所选反馈日；Bug 进度为生成时的最新状态。</span></div>')
+    templates = ''.join(f'<template id="date-{_h(date)}">{_html_view(item)}</template>'
+                        for date, item in views.items())
+    body = picker + f'<div id="board-view">{_html_view(payload)}</div>' + templates
     return (HTML_TEMPLATE.replace('__TITLE__', _h(title)).replace('__DEFAULT__', DEFAULT_RECORD_STATE)
             .replace('__BODY__', body))
 
@@ -976,6 +1007,8 @@ main{padding:22px 0 56px}
 .js .cats button{cursor:pointer}.js .cats button:hover{background:var(--page)}
 .cats button.on{background:var(--teal-soft);color:var(--teal);font-weight:600}
 .js-only{display:none}.js .js-only{display:flex}
+.date-tools{gap:10px;align-items:center;flex-wrap:wrap;padding:14px 0;color:var(--muted)}
+.date-tools select{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:4px;background:var(--white);color:var(--ink)}
 .tools{gap:8px;margin-bottom:6px}
 .tools input{flex:1;font:inherit;color:inherit;border:1px solid var(--line);border-radius:4px;padding:7px 10px;background:var(--white)}
 .tools select{font:inherit;color:inherit;border:1px solid var(--line);border-radius:4px;padding:7px 8px;background:var(--white)}
@@ -999,44 +1032,55 @@ footer{margin-top:20px;color:var(--muted);font-size:12px}
 __BODY__
 <script>
 (function () {
-  var list = document.getElementById('list');
-  if (!list) return;
   document.documentElement.classList.add('js');
-  var items = Array.prototype.slice.call(list.children);
-  var buttons = Array.prototype.slice.call(document.querySelectorAll('.cats button'));
-  var query = document.getElementById('q'), source = document.getElementById('src');
-  var pager = document.getElementById('pager'), none = document.getElementById('none');
-  var state = {category: '__DEFAULT__', page: 0}, PAGE = 30;
-  if (!buttons.some(function (button) { return button.dataset.key === state.category; })) state.category = '';
-  function draw() {
-    var q = query.value.trim().toLowerCase(), s = source.value;
-    var hits = items.filter(function (node) {
-      return (!state.category || node.dataset.state === state.category) && (!s || node.dataset.source === s)
-        && (!q || node.dataset.search.indexOf(q) >= 0);
-    });
-    var pages = Math.max(1, Math.ceil(hits.length / PAGE));
-    state.page = Math.min(state.page, pages - 1);
-    items.forEach(function (node) { node.hidden = true; });
-    hits.slice(state.page * PAGE, (state.page + 1) * PAGE).forEach(function (node) { node.hidden = false; });
-    none.hidden = hits.length > 0;
-    buttons.forEach(function (button) { button.classList.toggle('on', button.dataset.key === state.category); });
-    var label = document.createElement('span');
-    label.textContent = hits.length + ' 条 · 第 ' + (state.page + 1) + ' / ' + pages + ' 页';
-    var nav = document.createElement('span');
-    [['上一页', -1, state.page === 0], ['下一页', 1, state.page >= pages - 1]].forEach(function (item) {
-      var button = document.createElement('button');
-      button.type = 'button'; button.textContent = item[0]; button.disabled = item[2];
-      button.addEventListener('click', function () { state.page += item[1]; draw(); });
-      nav.appendChild(button);
-    });
-    pager.replaceChildren(label, nav);
-  }
-  buttons.forEach(function (button) {
-    button.addEventListener('click', function () { state.category = button.dataset.key; state.page = 0; draw(); });
+  var view = document.getElementById('board-view'), date = document.getElementById('feedback-date');
+  date.addEventListener('change', function () {
+    var template = document.getElementById('date-' + date.value);
+    if (!template) return;
+    view.replaceChildren(template.content.cloneNode(true));
+    document.title = '每日 Bug 值守｜' + date.value.slice(5) + ' 反馈日';
+    initRecords();
   });
-  query.addEventListener('input', function () { state.page = 0; draw(); });
-  source.addEventListener('change', function () { state.page = 0; draw(); });
-  draw();
+  function initRecords() {
+    var list = view.querySelector('#list');
+    if (!list) return;
+    var items = Array.prototype.slice.call(list.children);
+    var buttons = Array.prototype.slice.call(view.querySelectorAll('.cats button'));
+    var query = view.querySelector('#q'), source = view.querySelector('#src');
+    var pager = view.querySelector('#pager'), none = view.querySelector('#none');
+    var state = {category: '__DEFAULT__', page: 0}, PAGE = 30;
+    if (!buttons.some(function (button) { return button.dataset.key === state.category; })) state.category = '';
+    function draw() {
+      var q = query.value.trim().toLowerCase(), s = source.value;
+      var hits = items.filter(function (node) {
+        return (!state.category || node.dataset.state === state.category) && (!s || node.dataset.source === s)
+          && (!q || node.dataset.search.indexOf(q) >= 0);
+      });
+      var pages = Math.max(1, Math.ceil(hits.length / PAGE));
+      state.page = Math.min(state.page, pages - 1);
+      items.forEach(function (node) { node.hidden = true; });
+      hits.slice(state.page * PAGE, (state.page + 1) * PAGE).forEach(function (node) { node.hidden = false; });
+      none.hidden = hits.length > 0;
+      buttons.forEach(function (button) { button.classList.toggle('on', button.dataset.key === state.category); });
+      var label = document.createElement('span');
+      label.textContent = hits.length + ' 条 · 第 ' + (state.page + 1) + ' / ' + pages + ' 页';
+      var nav = document.createElement('span');
+      [['上一页', -1, state.page === 0], ['下一页', 1, state.page >= pages - 1]].forEach(function (item) {
+        var button = document.createElement('button');
+        button.type = 'button'; button.textContent = item[0]; button.disabled = item[2];
+        button.addEventListener('click', function () { state.page += item[1]; draw(); });
+        nav.appendChild(button);
+      });
+      pager.replaceChildren(label, nav);
+    }
+    buttons.forEach(function (button) {
+      button.addEventListener('click', function () { state.category = button.dataset.key; state.page = 0; draw(); });
+    });
+    query.addEventListener('input', function () { state.page = 0; draw(); });
+    source.addEventListener('change', function () { state.page = 0; draw(); });
+    draw();
+  }
+  initRecords();
 })();
 </script>
 </body>
@@ -1072,9 +1116,8 @@ def main(argv=None):
     (output / 'board.json').write_text(json.dumps(board, ensure_ascii=False, indent=2))
     (output / 'board.md').write_text(render_markdown(board, now))
     (output / 'slack.md').write_text(render_slack(board, now, args.board_link))
-    scan, scan_note = yesterday_scan(board, scans)
-    (output / 'board.html').write_text(
-        render_html(html_payload(board, now, scan, scan_note, args.board_link, args.issue_url_base)))
+    date_payloads = html_date_payloads(board, scans, now, args.board_link, args.issue_url_base)
+    (output / 'board.html').write_text(render_html(date_payloads[-1], date_payloads))
     print(json.dumps({'output': str(output), 'warnings': board['warnings'],
                       'followUpTasks': {key: len(value) for key, value in tasks.items()}}, ensure_ascii=False))
 

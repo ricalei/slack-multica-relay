@@ -1,6 +1,7 @@
 import datetime as dt
 import importlib.util
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 spec = importlib.util.spec_from_file_location('duty_board', Path(__file__).resolve().parents[1] / 'scripts/duty-board.py')
@@ -343,6 +344,65 @@ class HtmlTests(unittest.TestCase):
         self.assertEqual(html.count('</script>'), 1)
         self.assertIn('&lt;/script&gt;&lt;img src=x onerror=alert(1)&gt;', html)
         self.assertNotIn('<img', html)
+
+    def test_date_views_use_each_days_latest_scan_and_limit_feedback_scope(self):
+        scans = [
+            {'identifier': 'S-OLD', 'feedbackDate': '2026-10-13', 'createdAt': 'a',
+             'collected': {'canny': 2}, 'suspected': 1},
+            {'identifier': 'S-NEW', 'feedbackDate': '2026-10-13', 'createdAt': 'b',
+             'collected': {'canny': 8}, 'suspected': 3},
+            {'identifier': 'S-14', 'feedbackDate': '2026-10-14', 'createdAt': 'c',
+             'collected': {'canny': 4}, 'suspected': 2},
+        ]
+        bugs = [bug('TRIAL', '2026-10-11', 'review'), bug('EARLY', '2026-10-13', 'review'),
+                bug('LATE', '2026-10-14', 'fixing')]
+        board = board_module.build_board(scans, bugs, dt.date(2026, 10, 12), dt.date(2026, 10, 15))
+        board['warnings'].append('全局读取告警')
+        def index(identifier):
+            return {'targetDate': '2026-10-13' if identifier == 'S-NEW' else '2026-10-14',
+                    'records': [{'state': 'non_bug', 'summary': identifier}]}
+        with patch.object(board_module, 'load_scan_index', side_effect=index) as load:
+            payloads = board_module.html_date_payloads(board, scans, NOW)
+        self.assertEqual([item['through'] for item in payloads], ['2026-10-12', '2026-10-13', '2026-10-14'])
+        self.assertEqual([call.args[0] for call in load.call_args_list], ['S-NEW', 'S-14'])
+        early, latest = payloads[1:]
+        self.assertEqual(early['scan']['records'][0]['summary'], 'S-NEW')
+        self.assertEqual(early['rows'][-1]['collected'], 8)
+        self.assertEqual(early['total']['confirmed'], 2)
+        self.assertEqual([item['identifier'] for item in early['bugs']], ['TRIAL', 'EARLY'])
+        self.assertEqual({item['identifier'] for item in early['todo']}, {'EARLY', 'TRIAL'})
+        self.assertIn('全局读取告警', early['warnings'])
+        self.assertEqual(latest['total'], board['total'])
+        self.assertIsNone(payloads[0]['scan'])
+        self.assertIn('尚未扫描', payloads[0]['scanNote'])
+
+    def test_missing_historical_index_does_not_drop_other_date_views(self):
+        scans = [{'identifier': 'S-13', 'feedbackDate': '2026-10-13', 'createdAt': 'a'},
+                 {'identifier': 'S-14', 'feedbackDate': '2026-10-14', 'createdAt': 'b'}]
+        board = board_module.build_board(scans, [], dt.date(2026, 10, 13), dt.date(2026, 10, 15))
+        with patch.object(board_module, 'load_scan_index', side_effect=[OSError('unavailable'),
+                          {'targetDate': '2026-10-14', 'records': []}]):
+            early, latest = board_module.html_date_payloads(board, scans, NOW)
+        self.assertIsNone(early['scan'])
+        self.assertIn('S-13 没有可用的证据索引', early['scanNote'])
+        self.assertEqual(latest['scan']['identifier'], 'S-14')
+
+    def test_html_embeds_dates_and_preserves_static_default(self):
+        board = board_module.build_board([], [], dt.date(2026, 10, 12), dt.date(2026, 10, 15))
+        payloads = board_module.html_date_payloads(board, [], NOW)
+        html = board_module.render_html(payloads[-1], payloads)
+        self.assertIn('<option value="2026-10-14" selected>', html)
+        self.assertIn('<option value="2026-10-13">', html)
+        self.assertIn('<template id="date-2026-10-13">', html)
+        self.assertIn('<div id="board-view"><header', html)
+        self.assertIn('Bug 进度为生成时的最新状态', html)
+        self.assertNotIn('fetch(', html)
+
+    def test_empty_date_range_still_renders_default(self):
+        board = board_module.build_board([], [], dt.date(2026, 10, 15), dt.date(2026, 10, 15))
+        payloads = board_module.html_date_payloads(board, [], NOW)
+        self.assertEqual([item['through'] for item in payloads], ['2026-10-14'])
+        self.assertIn('2026-10-14', board_module.render_html(payloads[0], payloads))
 
     def test_yesterday_without_scan_explains_missing_records(self):
         board = board_module.build_board([], [], dt.date(2026, 10, 13), dt.date(2026, 10, 15))
