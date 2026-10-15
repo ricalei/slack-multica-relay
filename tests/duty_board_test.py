@@ -335,13 +335,14 @@ class HtmlTests(unittest.TestCase):
                 handle.writestr('other.json', '{}')
             self.assertIsNone(board_module.read_scan_index(empty))
 
-    def test_html_embeds_record_text_without_closing_script(self):
+    def test_html_is_static_and_escapes_record_text(self):
         board = board_module.build_board([], [], dt.date(2026, 10, 13), dt.date(2026, 10, 15))
         scan = {'identifier': 'S1', 'records': board_module.scan_records(
             {'records': [{'state': 'non_bug', 'summary': '</script><img src=x onerror=alert(1)>'}]})}
         html = board_module.render_html(board_module.html_payload(board, NOW, scan, None, 'https://m/board', 'https://m/'))
-        self.assertEqual(html.count('</script>'), 2)
-        self.assertIn('\\u003c/script>', html)
+        self.assertEqual(html.count('</script>'), 1)
+        self.assertIn('&lt;/script&gt;&lt;img src=x onerror=alert(1)&gt;', html)
+        self.assertNotIn('<img', html)
 
     def test_yesterday_without_scan_explains_missing_records(self):
         board = board_module.build_board([], [], dt.date(2026, 10, 13), dt.date(2026, 10, 15))

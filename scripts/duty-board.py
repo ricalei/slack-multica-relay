@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+from html import escape
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -731,12 +732,112 @@ def html_payload(board, now, scan, scan_note, board_link=None, issue_url_base=''
     }
 
 
+def _h(value):
+    return escape(str(value), quote=True)
+
+
+def _a(text, url):
+    url = _https(url)
+    return f'<a href="{_h(url)}" target="_blank" rel="noopener">{_h(text)}</a>' if url else _h(text)
+
+
+def _html_kpis(payload):
+    latest, total = payload['latest'], payload['total']
+    if not latest:
+        return ''
+    scanned = latest.get('scanned', True)
+    suspected = _suspected(latest, scanned)
+    cards = [('昨日采集', _num(latest['collected'], scanned), f"{latest['date'][5:]} 反馈日"),
+             ('昨日疑似候选', suspected, '需要调查的反馈'), ('昨日确认 Bug', latest['confirmed'], '进入修复'),
+             ('累计确认 Bug', total['confirmed'], f"已上线 {total['released']} · 已回告 {total['notified']}")]
+    return '<div class="kpis">' + ''.join(
+        f'<div class="kpi"><div class="label">{_h(label)}</div><div class="value">{_h(value)}</div>'
+        f'<div class="hint">{_h(hint)}</div></div>' for label, value, hint in cards) + '</div>'
+
+
+def _html_attention(payload):
+    items = ['<li>' + _h(f"{group['title']} {len(group['items'])}：") + '、'.join(
+        _a(item['identifier'], item['url']) + (_h(f"（{item['note']}）") if item['note'] else '')
+        for item in group['items']) + '</li>' for group in payload['attention']]
+    items += [f'<li>{_h(text)}</li>' for text in payload['warnings']]
+    return f'<section><h2>需要关注</h2><ul class="plain">{"".join(items)}</ul></section>' if items else ''
+
+
+def _html_table(header, rows, last_bold=False):
+    head = ''.join(f'<th>{_h(text)}</th>' for text in header)
+    body = ''.join(f'<tr class="{"total" if last_bold and index == len(rows) - 1 else ""}">{row}</tr>'
+                   for index, row in enumerate(rows))
+    return f'<div class="scroll"><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
+
+
+def _html_bugs(payload):
+    rows = [''.join([
+        f"<td>{_a(bug['identifier'], bug['url'])}</td>", f"<td>{_h(bug['feedbackDate'])}</td>",
+        f"<td>{_a(bug['source'] or '–', bug['sourceUrl'])}</td>", f"<td class=\"wrap\">{_h(bug['summary'])}</td>",
+        '<td class="wrap">' + ('、'.join(_a(pr['label'], pr['url']) for pr in bug['prs']) or '–') + '</td>',
+        f"<td class=\"wrap\"><span class=\"badge s-{_h(bug['state'])}\">{_h(bug['status'])}</span></td>",
+        f"<td class=\"wrap\">{_h(bug['notify'])}</td>"]) for bug in payload['bugs']]
+    table = _html_table(['Bug', '反馈日', '来源', '问题', 'PR', '状态', '回告'], rows) if rows else '<p class="empty">暂无 Bug</p>'
+    return f'<section><h2>Bug 明细</h2>{table}</section>'
+
+
+def _html_record(record, names):
+    tickets = ''.join(f'<span class="badge">{_h(ticket)}</span>' for ticket in record['tickets'])
+    links = (_a('原反馈', record['sourceUrl']) if record['sourceUrl'] else '') + (_a('关联 PR', record['pr']) if record['pr'] else '')
+    meta = (f'<div class="meta"><span class="badge">{_h(names.get(record["state"], record["state"]))}</span>'
+            f'<span>{_h(record["source"])}</span>{links}{tickets}</div>')
+    head = meta + f'<div class="title">{_h(record["summary"])}</div>' + (
+        f'<div class="reason">{_h(record["reason"])}</div>' if record['reason'] else '')
+    body = ''.join(f'<div><b>{_h(label)}</b>{_h(text)}</div>' for label, text in record['details'])
+    if record['attempts']:
+        body += '<div><b>已做尝试</b><ul class="plain">' + ''.join(
+            f'<li>{_h(text)}</li>' for text in record['attempts']) + '</ul></div>'
+    search = ' '.join([record['summary'], record['reason'], *record['tickets']]).lower()
+    attrs = f'class="record" data-state="{_h(record["state"])}" data-source="{_h(record["source"])}" data-search="{_h(search)}"'
+    if body:
+        return f'<details {attrs}><summary>{head}</summary><div class="detail">{body}</div></details>'
+    return f'<div {attrs}>{head}</div>'
+
+
+def _html_scan(payload):
+    title = f"<h2>昨日逐条记录（{_h(payload['through'][5:])} 反馈日）</h2>"
+    scan = payload['scan']
+    if not scan:
+        return f'<section>{title}<p class="empty">{_h(payload["scanNote"] or "暂无逐条记录。")}</p></section>'
+    records, names = scan['records'], payload['stateNames']
+    counts = {}
+    for record in records:
+        counts[record['state']] = counts.get(record['state'], 0) + 1
+    order = list(names) + [state for state in counts if state not in names]
+    bars = ''.join(
+        f'<div class="bar" data-key="{_h(state)}"><span>{_h(names.get(state, state))}</span>'
+        f'<div class="track"><div class="fill" style="width:{counts[state] / len(records) * 100:.1f}%"></div></div>'
+        f'<span>{counts[state]}</span></div>' for state in order if counts.get(state))
+    sources = ''.join(f'<option value="{_h(source)}">{_h(source)}</option>'
+                      for source in sorted({record['source'] for record in records}))
+    # 筛选、搜索与分页在脚本可用时才出现；预览禁用脚本时直接展示全部记录。
+    toolbar = ('<div class="toolbar js-only"><input type="search" id="q" placeholder="搜索摘要、原因或工单号">'
+               f'<select id="src"><option value="">全部来源</option>{sources}</select></div>')
+    intro = (f'<div class="sub">共 {len(records)} 条，来自 {_a(scan["identifier"], scan["url"])}。'
+             '待验证不等于没有 Bug；点击记录展开判断依据。</div>')
+    list_html = ''.join(_html_record(record, names) for record in records)
+    return (f'<section id="scan">{title}{intro}<div class="bars">{bars}</div>{toolbar}'
+            f'<div id="records">{list_html}</div><p class="empty" id="none" hidden>没有匹配的记录。</p>'
+            '<div class="pager js-only" id="pager"></div></section>')
+
+
 def render_html(payload):
-    # 数据以 JSON 内嵌，页面脚本只用 textContent 渲染；转义 < 与行分隔符，防止记录正文提前闭合 script。
-    data = (json.dumps(payload, ensure_ascii=False).replace('<', '\\u003c')
-            .replace('\u2028', '\\u2028').replace('\u2029', '\\u2029'))
+    """静态生成全部内容，不依赖脚本即可阅读；脚本只增加筛选、搜索与分页。"""
     title = f"每日 Bug 值守看板｜截至 {payload['through'][5:]}"
-    return HTML_TEMPLATE.replace('__TITLE__', title).replace('__DATA__', data)
+    board_link = f" · {_a('Multica 常驻看板', payload['boardLink'])}" if payload['boardLink'] else ''
+    funnel_rows = [''.join(f'<td>{_h(cell)}</td>' for cell in cells) for cells in payload['funnel']]
+    body = ''.join([
+        f'<header><h1>{_h(title)}</h1><div class="sub">生成时间 {_h(payload["generatedAt"])}（Asia/Shanghai）'
+        f' · d1 = {_h(payload["start"])}{board_link}</div></header>',
+        _html_kpis(payload), _html_attention(payload),
+        f'<section><h2>漏斗</h2>{_html_table(payload["header"], funnel_rows, last_bold=True)}</section>',
+        _html_bugs(payload), _html_scan(payload)])
+    return HTML_TEMPLATE.replace('__TITLE__', _h(title)).replace('__BODY__', body)
 
 
 HTML_TEMPLATE = r'''<!doctype html>
@@ -747,7 +848,7 @@ HTML_TEMPLATE = r'''<!doctype html>
 <title>__TITLE__</title>
 <style>
 :root{--bg:#f6f7f9;--card:#fff;--text:#1d2129;--muted:#6b7280;--line:#e5e7eb;--accent:#2563eb;--soft:#eef2ff;
---green:#16a34a;--amber:#d97706;--red:#dc2626;--gray:#9ca3af}
+--green:#16a34a;--amber:#d97706;--red:#dc2626}
 @media (prefers-color-scheme:dark){:root{--bg:#111318;--card:#1a1d24;--text:#e5e7eb;--muted:#9aa1ad;--line:#2b303a;
 --accent:#60a5fa;--soft:#1e2a44}}
 *{box-sizing:border-box}
@@ -769,12 +870,13 @@ th{color:var(--muted);font-weight:500}
 tr.total td{font-weight:600}
 .badge{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;background:var(--soft)}
 .s-released{color:var(--green)}.s-merged,.s-review{color:var(--amber)}.s-rejected,.s-pr_closed{color:var(--red)}
-.bars{display:flex;flex-direction:column;gap:6px}
-.bar{display:grid;grid-template-columns:130px 1fr 56px;gap:10px;align-items:center;cursor:pointer;border-radius:6px;padding:2px 4px}
-.bar:hover,.bar.on{background:var(--soft)}
+.bars{display:flex;flex-direction:column;gap:6px;margin:12px 0}
+.bar{display:grid;grid-template-columns:130px 1fr 56px;gap:10px;align-items:center;border-radius:6px;padding:2px 4px}
+.js .bar{cursor:pointer}.js .bar:hover,.bar.on{background:var(--soft)}
 .track{height:10px;background:var(--line);border-radius:999px;overflow:hidden}
 .fill{height:100%;background:var(--accent)}
-.toolbar{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
+.js-only{display:none}.js .js-only{display:flex}
+.toolbar{flex-wrap:wrap;gap:8px;margin-bottom:10px}
 input,select,button{font:inherit;color:inherit;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:6px 10px}
 input{flex:1;min-width:200px}button{cursor:pointer}button:disabled{opacity:.4;cursor:default}
 .record{border-top:1px solid var(--line);padding:10px 2px}
@@ -784,131 +886,50 @@ input{flex:1;min-width:200px}button{cursor:pointer}button:disabled{opacity:.4;cu
 .reason{color:var(--muted);font-size:13px}
 .detail{margin:8px 0 0 0;padding-left:12px;border-left:2px solid var(--line);font-size:13px}
 .detail div{margin:4px 0}.detail b{color:var(--muted);font-weight:500;margin-right:6px}
-.pager{display:flex;gap:8px;align-items:center;justify-content:flex-end;margin-top:10px;color:var(--muted)}
+.pager{gap:8px;align-items:center;justify-content:flex-end;margin-top:10px;color:var(--muted)}
 ul.plain{margin:0;padding-left:18px}
 .empty{color:var(--muted)}
 </style>
 </head>
 <body>
-<main id="app"></main>
-<script id="board-data" type="application/json">__DATA__</script>
+<main>__BODY__</main>
 <script>
 (function () {
-  const data = JSON.parse(document.getElementById('board-data').textContent);
-  const app = document.getElementById('app');
-  function el(tag, attrs, children) {
-    const node = document.createElement(tag);
-    Object.entries(attrs || {}).forEach(([key, value]) => {
-      if (value === null || value === undefined || value === '') return;
-      if (key === 'text') node.textContent = value; else node.setAttribute(key, value);
-    });
-    (children || []).forEach(child => { if (child) node.append(typeof child === 'string' ? document.createTextNode(child) : child); });
-    return node;
-  }
-  function link(text, url) { return /^https?:\/\//.test(url || '') ? el('a', {href: url, target: '_blank', rel: 'noopener', text}) : el('span', {text}); }
-  function section(title, children) { return el('section', {}, [el('h2', {text: title}), ...children]); }
-  function num(value, scanned) { return scanned === false ? '未扫描' : (value === null || value === undefined ? '缺失' : String(value)); }
-
-  const header = el('header', {}, [
-    el('h1', {text: `每日 Bug 值守看板｜截至 ${data.through.slice(5)}`}),
-    el('div', {class: 'sub'}, [`生成时间 ${data.generatedAt}（Asia/Shanghai）· d1 = ${data.start}`,
-      data.boardLink ? ' · ' : '', data.boardLink ? link('Multica 常驻看板', data.boardLink) : null]),
-  ]);
-  app.append(header);
-
-  const latest = data.latest, total = data.total;
-  if (latest) {
-    const estimated = latest.suspectedEstimated && latest.suspected !== null ? '约 ' : '';
-    app.append(el('div', {class: 'kpis'}, [
-      ['昨日采集', num(latest.collected, latest.scanned), `${latest.date.slice(5)} 反馈日`],
-      ['昨日疑似候选', latest.scanned === false ? '未扫描' : estimated + num(latest.suspected), '需要调查的反馈'],
-      ['昨日确认 Bug', String(latest.confirmed), '进入修复'],
-      ['累计确认 Bug', String(total.confirmed), `已上线 ${total.released} · 已回告 ${total.notified}`],
-    ].map(([label, value, hint]) => el('div', {class: 'kpi'}, [
-      el('div', {class: 'label', text: label}), el('div', {class: 'value', text: value}), el('div', {class: 'hint', text: hint})]))));
-  }
-
-  if (data.attention.length || data.warnings.length) {
-    const items = data.attention.map(group => el('li', {}, [`${group.title} ${group.items.length}：`,
-      ...group.items.flatMap((item, i) => [i ? '、' : '', link(item.identifier, item.url), item.note ? `（${item.note}）` : ''])]));
-    data.warnings.forEach(text => items.push(el('li', {text})));
-    app.append(section('需要关注', [el('ul', {class: 'plain'}, items)]));
-  }
-
-  const funnel = el('table', {}, [el('thead', {}, [el('tr', {}, data.header.map(text => el('th', {text})))]),
-    el('tbody', {}, data.funnel.map((cells, i) => el('tr', {class: i === data.funnel.length - 1 ? 'total' : ''},
-      cells.map(text => el('td', {text})))))]);
-  app.append(section('漏斗', [el('div', {class: 'scroll'}, [funnel])]));
-
-  const bugRows = data.bugs.map(bug => el('tr', {}, [
-    el('td', {}, [link(bug.identifier, bug.url)]), el('td', {text: bug.feedbackDate}),
-    el('td', {}, [link(bug.source || '–', bug.sourceUrl)]), el('td', {class: 'wrap', text: bug.summary}),
-    el('td', {class: 'wrap'}, bug.prs.length ? bug.prs.flatMap((pr, i) => [i ? '、' : '', link(pr.label, pr.url)]) : ['–']),
-    el('td', {class: 'wrap'}, [el('span', {class: `badge s-${bug.state}`, text: bug.status})]),
-    el('td', {class: 'wrap', text: bug.notify}),
-  ]));
-  app.append(section('Bug 明细', [el('div', {class: 'scroll'}, [el('table', {}, [
-    el('thead', {}, [el('tr', {}, ['Bug', '反馈日', '来源', '问题', 'PR', '状态', '回告'].map(text => el('th', {text})))]),
-    el('tbody', {}, bugRows.length ? bugRows : [el('tr', {}, [el('td', {class: 'empty', text: '暂无 Bug'})])])])])]));
-
-  const scanSection = section(`昨日逐条记录（${data.through.slice(5)} 反馈日）`, []);
-  app.append(scanSection);
-  if (!data.scan) { scanSection.append(el('p', {class: 'empty', text: data.scanNote || '暂无逐条记录。'})); return; }
-  const records = data.scan.records;
-  scanSection.append(el('div', {class: 'sub'}, [`共 ${records.length} 条，来自 `, link(data.scan.identifier, data.scan.url),
-    '。待验证不等于没有 Bug；点击分类可筛选，点击记录展开判断依据。']));
-  const counts = {};
-  records.forEach(record => { counts[record.state] = (counts[record.state] || 0) + 1; });
-  const order = Object.keys(data.stateNames).concat(Object.keys(counts).filter(key => !(key in data.stateNames)));
-  const state = {query: '', category: '', source: '', page: 0};
-  const bars = el('div', {class: 'bars'});
-  order.filter(key => counts[key]).forEach(key => {
-    const bar = el('div', {class: 'bar', 'data-key': key}, [el('span', {text: data.stateNames[key] || key}),
-      el('div', {class: 'track'}, [el('div', {class: 'fill', style: `width:${(counts[key] / records.length * 100).toFixed(1)}%`})]),
-      el('span', {text: String(counts[key])})]);
-    bar.addEventListener('click', () => { state.category = state.category === key ? '' : key; state.page = 0; draw(); });
-    bars.append(bar);
-  });
-  const search = el('input', {type: 'search', placeholder: '搜索摘要、原因或工单号'});
-  const sources = el('select', {}, [el('option', {value: '', text: '全部来源'}),
-    ...[...new Set(records.map(record => record.source))].sort().map(source => el('option', {value: source, text: source}))]);
-  search.addEventListener('input', () => { state.query = search.value.trim().toLowerCase(); state.page = 0; draw(); });
-  sources.addEventListener('change', () => { state.source = sources.value; state.page = 0; draw(); });
-  const list = el('div'), pager = el('div', {class: 'pager'});
-  scanSection.append(el('div', {style: 'margin:12px 0'}, [bars]), el('div', {class: 'toolbar'}, [search, sources]), list, pager);
-  const PAGE = 30;
-  function matches(record) {
-    if (state.category && record.state !== state.category) return false;
-    if (state.source && record.source !== state.source) return false;
-    if (!state.query) return true;
-    return [record.summary, record.reason, ...record.tickets].join(' ').toLowerCase().includes(state.query);
-  }
-  function card(record) {
-    const meta = el('div', {class: 'meta'}, [el('span', {class: 'badge', text: data.stateNames[record.state] || record.state}),
-      el('span', {text: record.source}), record.sourceUrl ? link('原反馈', record.sourceUrl) : null,
-      ...record.tickets.map(ticket => el('span', {class: 'badge', text: ticket})), record.pr ? link('关联 PR', record.pr) : null]);
-    const body = [...record.details.map(([label, text]) => el('div', {}, [el('b', {text: label}), text])),
-      ...(record.attempts.length ? [el('div', {}, [el('b', {text: '已做尝试'}),
-        el('ul', {class: 'plain'}, record.attempts.map(text => el('li', {text})))])] : [])];
-    const head = el('summary', {}, [meta, el('div', {class: 'title', text: record.summary}),
-      record.reason ? el('div', {class: 'reason', text: record.reason}) : null]);
-    return body.length ? el('details', {class: 'record'}, [head, el('div', {class: 'detail'}, body)])
-      : el('div', {class: 'record'}, [meta, el('div', {class: 'title', text: record.summary}),
-        record.reason ? el('div', {class: 'reason', text: record.reason}) : null]);
-  }
+  var section = document.getElementById('scan');
+  if (!section || !document.getElementById('records')) return;
+  document.documentElement.classList.add('js');
+  var records = Array.prototype.slice.call(document.querySelectorAll('#records .record'));
+  var bars = Array.prototype.slice.call(section.querySelectorAll('.bar'));
+  var query = document.getElementById('q'), source = document.getElementById('src');
+  var pager = document.getElementById('pager'), none = document.getElementById('none');
+  var state = {category: '', page: 0}, PAGE = 30;
   function draw() {
-    bars.querySelectorAll('.bar').forEach(bar => bar.classList.toggle('on', bar.dataset.key === state.category));
-    const hits = records.filter(matches);
-    const pages = Math.max(1, Math.ceil(hits.length / PAGE));
+    var q = query.value.trim().toLowerCase(), s = source.value;
+    var hits = records.filter(function (node) {
+      return (!state.category || node.dataset.state === state.category) && (!s || node.dataset.source === s)
+        && (!q || node.dataset.search.indexOf(q) >= 0);
+    });
+    var pages = Math.max(1, Math.ceil(hits.length / PAGE));
     state.page = Math.min(state.page, pages - 1);
-    list.replaceChildren(...(hits.length ? hits.slice(state.page * PAGE, (state.page + 1) * PAGE).map(card)
-      : [el('p', {class: 'empty', text: '没有匹配的记录。'})]));
-    const prev = el('button', {text: '上一页'}), next = el('button', {text: '下一页'});
-    prev.disabled = state.page === 0; next.disabled = state.page >= pages - 1;
-    prev.addEventListener('click', () => { state.page -= 1; draw(); });
-    next.addEventListener('click', () => { state.page += 1; draw(); });
-    pager.replaceChildren(`${hits.length} 条 · 第 ${state.page + 1}/${pages} 页`, prev, next);
+    records.forEach(function (node) { node.hidden = true; });
+    hits.slice(state.page * PAGE, (state.page + 1) * PAGE).forEach(function (node) { node.hidden = false; });
+    none.hidden = hits.length > 0;
+    bars.forEach(function (bar) { bar.classList.toggle('on', bar.dataset.key === state.category); });
+    pager.textContent = hits.length + ' 条 · 第 ' + (state.page + 1) + '/' + pages + ' 页';
+    [['上一页', -1, state.page === 0], ['下一页', 1, state.page >= pages - 1]].forEach(function (item) {
+      var button = document.createElement('button');
+      button.textContent = item[0]; button.disabled = item[2];
+      button.addEventListener('click', function () { state.page += item[1]; draw(); });
+      pager.appendChild(button);
+    });
   }
+  bars.forEach(function (bar) {
+    bar.addEventListener('click', function () {
+      state.category = state.category === bar.dataset.key ? '' : bar.dataset.key; state.page = 0; draw();
+    });
+  });
+  query.addEventListener('input', function () { state.page = 0; draw(); });
+  source.addEventListener('change', function () { state.page = 0; draw(); });
   draw();
 })();
 </script>
