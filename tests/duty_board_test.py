@@ -95,6 +95,74 @@ class NotifyStateTests(unittest.TestCase):
         self.assertEqual(board_module.notify_state({'state': 'skipped'}), 'skipped')
 
 
+class FollowUpTests(unittest.TestCase):
+    NOTIFY = {'issue': 'B1', 'kind': 'notify', 'state': 'sent', 'at': '2026-10-14T00:00:00Z'}
+    AT = dt.datetime(2026, 10, 14, tzinfo=dt.timezone.utc).timestamp()
+
+    def part(self, pid, hours, author='admin', part_type='comment'):
+        return {'id': pid, 'part_type': part_type, 'author_type': author, 'created_at': self.AT + hours * 3600,
+                'text': f'text {pid}'}
+
+    def run_follow_up(self, parts, record=None, now=NOW, source='intercom'):
+        return board_module.follow_up(source, self.NOTIFY, record, lambda: parts, now)
+
+    def test_other_sources_are_not_read(self):
+        def fail():
+            raise AssertionError('不应读取会话')
+        self.assertEqual(board_module.follow_up('facebook', self.NOTIFY, None, fail, NOW)['state'], 'untracked')
+        self.assertEqual(board_module.follow_up('canny', self.NOTIFY, None, fail, NOW)['state'], 'not_integrated')
+
+    def test_awaiting_cs_lists_public_admin_replies_after_notify_and_after_judged_point(self):
+        parts = [self.part('a0', -1), self.part('n1', 1, part_type='note'), self.part('b1', 2, author='bot'),
+                 self.part('u1', 3, author='user'), self.part('a1', 4), self.part('a2', 6)]
+        result = self.run_follow_up(parts)
+        self.assertEqual(result['state'], 'awaiting_cs')
+        self.assertEqual([item['partId'] for item in result['candidates']], ['a1', 'a2'])
+        self.assertEqual(result['record']['notifyAt'], self.NOTIFY['at'])
+        judged = {**result['record'], 'judgedThrough': '2026-10-14T04:00:00Z'}
+        self.assertEqual([item['partId'] for item in self.run_follow_up(parts, judged)['candidates']], ['a2'])
+        stale = {**judged, 'notifyAt': '2026-10-01T00:00:00Z'}
+        self.assertEqual(len(self.run_follow_up(parts, stale)['candidates']), 2)
+
+    def test_customer_message_after_cs_informed_is_response(self):
+        record = {'issue': 'B1', 'kind': 'notify-followup', 'notifyAt': self.NOTIFY['at'],
+                  'judgedThrough': '2026-10-14T04:00:00Z', 'csInformedAt': '2026-10-14T04:00:00Z',
+                  'csInformedPartId': 'a1', 'respondedAt': None}
+        before = [self.part('u0', 3, author='user'), self.part('a1', 4)]
+        self.assertEqual(self.run_follow_up(before, record)['state'], 'cs_informed')
+        result = self.run_follow_up(before + [self.part('u2', 7, author='lead'), self.part('u1', 5, author='user')], record)
+        self.assertEqual((result['state'], result['respondedAt']), ('responded', '2026-10-14T05:00:00Z'))
+        self.assertEqual(result['proposal'], {**record, 'respondedAt': '2026-10-14T05:00:00Z'})
+
+    def test_recorded_response_and_deadline_skip_reading(self):
+        def fail():
+            raise AssertionError('不应读取会话')
+        record = {'notifyAt': self.NOTIFY['at'], 'csInformedAt': '2026-10-14T04:00:00Z', 'respondedAt': '2026-10-14T05:00:00Z'}
+        self.assertEqual(board_module.follow_up('intercom', self.NOTIFY, record, fail, NOW)['state'], 'responded')
+        late = NOW + dt.timedelta(days=14)
+        expired = board_module.follow_up('intercom', self.NOTIFY, {**record, 'respondedAt': None}, fail, late)
+        self.assertEqual((expired['state'], expired['csInformedAt']), ('expired', '2026-10-14T04:00:00Z'))
+        self.assertEqual(self.run_follow_up(None)['state'], 'unread')
+
+    def test_layers_labels_and_new_response_attention(self):
+        released = [pr('merged', release={'tag': 't'})]
+        def item(identifier, notify, follow=None):
+            return {**bug(identifier, '2026-10-13', 'released', released), 'notify': notify, 'followUp': follow}
+        bugs = [item('P', 'pending'), item('S', 'skipped'),
+                item('W', 'sent', {'state': 'awaiting_cs', 'deadline': '2026-10-27T00:00:00+00:00'}),
+                item('R', 'sent', {'state': 'responded', 'respondedAt': '2026-10-14T20:00:00Z'}),
+                item('O', 'sent', {'state': 'responded', 'respondedAt': '2026-10-13T20:00:00Z'})]
+        board = board_module.build_board([], bugs, dt.date(2026, 10, 13), dt.date(2026, 10, 14))
+        self.assertEqual((board['rows'][0]['notified'], board['rows'][0]['responded']), (3, 2))
+        self.assertEqual([entry[0]['identifier'] for entry in board_module.attention(board, NOW)['responded']], ['R'])
+        labels = {item['identifier']: board_module.notify_label(item, NOW) for item in bugs}
+        self.assertEqual(labels['P'], '待回告')
+        self.assertEqual(labels['S'], '不回告：原因未填')
+        self.assertEqual(labels['W'], '已回告，待 CS 告知客户（剩 11 天）')
+        self.assertEqual(labels['R'], '客户有回应（10-15）')
+        self.assertIn('已回告 3 个 · 客户回应 2 个', board_module.render_slack(board, NOW))
+
+
 class BugStateTests(unittest.TestCase):
     def test_rejection_overrides_pr_progress(self):
         self.assertEqual(board_module.bug_state([pr('merged', release={'tag': 't'})], True), 'rejected')
