@@ -1,0 +1,49 @@
+{
+  "mode": "flow_test",
+  "simulated": true,
+  "formalExperience": false,
+  "verifiedAt": "2026-10-12T16:59:12.306987+08:00",
+  "executionContractId": "weekly-v4-flow-test-20261012",
+  "parentIssueId": "01a12f36-ee1b-797b-9e97-1e4fc55a3bc1",
+  "checks": {
+    "pendingDecisionDoesNotBlockReadyItems": true,
+    "negativeCommentDoesNotApprove": true,
+    "nativeSquadMentionOnDecisionIssueResumesOriginalBatch": true,
+    "decisionVersionPreservedOnRepeat": true,
+    "oneEngineeringRunPerItem": true,
+    "engineeringRunsDoNotOverlap": true,
+    "sevenSectionCardPresent": true,
+    "allSimulatedDeliveriesAndReceiptsVerified": true
+  },
+  "engineeringIntervals": [
+    {
+      "key": "B",
+      "issue": "GRM-614",
+      "runId": "01a12f39-c769-7d35-afd2-51583e0dad62",
+      "startedAt": "2026-10-12T08:27:58Z",
+      "completedAt": "2026-10-12T08:30:22Z"
+    },
+    {
+      "key": "C",
+      "issue": "GRM-615",
+      "runId": "01a12f3c-e1b5-7a29-a9d1-eb2bb04b79dc",
+      "startedAt": "2026-10-12T08:31:22Z",
+      "completedAt": "2026-10-12T08:36:24Z"
+    },
+    {
+      "key": "A",
+      "issue": "GRM-613",
+      "runId": "01a12f46-f299-7f10-a360-16fa03b26179",
+      "startedAt": "2026-10-12T08:42:22Z",
+      "completedAt": "2026-10-12T08:45:05Z"
+    }
+  ],
+  "negativeCommentId": "01a12f3c-1058-7d15-8e66-498212722057",
+  "positiveCommentId": "01a12f3f-8ba7-744c-b595-9a6b64e3f8be",
+  "repeatCommentId": "01a12f44-ba60-70db-9328-0d936c357337",
+  "decisionVersion": 1,
+  "limits": [
+    "仅隔离模拟，未验证真实反馈/开发/动态验收/HTML/Slack交付",
+    "决定在C运行期间返回；仅余待决定终态、重复工程交接及非owner委派入口未专项测试"
+  ]
+}
