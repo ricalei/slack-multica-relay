@@ -25,7 +25,7 @@ SCAN_OUTCOMES = ('confirmed', 'duplicate', 'verificationBlocked', 'excludedAfter
 FOLLOW_UP_DAYS = 14
 # 各来源 notify-followup 记录的跟踪字段，respondedAt 为共用的客户回应时间。
 FOLLOW_UP_FIELDS = {'intercom': ('judgedThrough', 'csInformedAt', 'csInformedPartId'),
-                    'canny': ('replyAuthorId', 'baselineScore')}
+                    'canny': ('judgedThrough', 'baselineScore', 'respondedCommentId')}
 STATE_LABELS = {
     'rejected': '⛔ 不上线', 'released': '🟢 已上线', 'merged': '🟡 已合并待上线',
     'review': '⚪ 待审', 'pr_closed': '⚠️ PR 已关闭未合并', 'fixing': '🔧 修复中',
@@ -99,22 +99,20 @@ def notify_state(notify):
 
 
 def canny_follow_up(notify, record, activity, base):
-    """Canny 评论没有官方标识：首次跟踪时把回告前最新一条顶层评论的作者记为回告账号，并记录当时票数为基准；
-    之后其他作者的公开新评论算客户回应，票数变化只作参考。"""
-    at = _parse(notify['at'])
-    comments = [item for item in activity['comments'] if not item['internal'] and not item['private']]
-    proposal = None
-    if record.get('baselineScore') is None:
-        ours = [item for item in comments if not item['parentId'] and _parse(item['createdAt']) <= at]
-        record = proposal = {**record, 'replyAuthorId': ours[-1]['authorId'] if ours else None,
-                             'baselineScore': activity['post']['score']}
-    replies = sorted(_parse(item['createdAt']) for item in comments
-                     if _parse(item['createdAt']) > at and item['authorId'] != record['replyAuthorId'])
-    if replies:
-        responded = replies[0].strftime('%Y-%m-%dT%H:%M:%SZ')
-        return {'state': 'responded', 'respondedAt': responded, 'proposal': {**record, 'respondedAt': responded}}
+    """Canny 评论没有官方标识，是否为客户回应由看板 Agent 按语义判断：回告后（及上次判断点 judgedThrough 后）的
+    公开新评论交给它，判为客户回应的最早一条记为 respondedAt。首次跟踪时记录票数基准，票数变化只作参考。"""
+    new_baseline = record.get('baselineScore') is None
+    if new_baseline:
+        record = {**record, 'baselineScore': activity['post']['score']}
+    since = _parse(record.get('judgedThrough') or notify['at'])
+    candidates = [{'commentId': item['id'], 'at': _parse(item['createdAt']).strftime('%Y-%m-%dT%H:%M:%SZ'),
+                   'author': item.get('authorName', ''), 'isReply': bool(item['parentId']), 'text': item.get('text', '')[:2000]}
+                  for item in activity['comments']
+                  if not item['internal'] and not item['private'] and _parse(item['createdAt']) > since]
     result = {'state': 'awaiting_customer', **base, 'scoreDelta': activity['post']['score'] - record['baselineScore']}
-    return {**result, 'proposal': proposal} if proposal else result
+    if candidates:
+        return {**result, 'candidates': candidates, 'record': record}
+    return {**result, 'proposal': record} if new_baseline else result
 
 
 def _iso(timestamp):
@@ -385,7 +383,7 @@ def render_markdown(board, now):
         '- 已上线：PR 合并提交已包含在「Release to PRODUCTION」成功运行的 release 标签中；无该流程的仓库合并即视为就绪。',
         '- 不上线：审查人在 Bug 交付 thread 上点 🚫；原因取其以 🚫 开头的最新回复。',
         f'- 已回告：台账有发送记录；用户回应：Intercom 须 CS 回复确实告知客户已修复上线后，客户再有消息才算。'
-        f'Canny 以回告后其他作者的公开新评论为回应，票数变化只作参考。从回告起跟踪 {FOLLOW_UP_DAYS} 天；Facebook 不跟踪回应。']
+        f'Canny 由看板 Agent 按语义判断回告后的新评论是否为客户回应，票数变化只作参考。从回告起跟踪 {FOLLOW_UP_DAYS} 天；Facebook 不跟踪回应。']
     return '\n'.join(lines) + '\n'
 
 
@@ -528,10 +526,10 @@ def intercom_parts(cli, url):
 
 
 def canny_activity(cli, url, account_ref):
-    """经 moe-feedback-collector 只读读取 Canny 帖子票数与评论元数据；读取失败返回 None。"""
+    """经 moe-feedback-collector 只读读取 Canny 帖子票数与评论（含正文，供看板 Agent 判断）；读取失败返回 None。"""
     if not url:
         return None
-    command = ['uv', 'run', '-q', '--script', cli, 'canny-post', '--url', url]
+    command = ['uv', 'run', '-q', '--script', cli, 'canny-post', '--url', url, '--include-text']
     try:
         return run_json(command + (['--account-ref', account_ref] if account_ref else []))
     except (subprocess.CalledProcessError, json.JSONDecodeError):
@@ -539,15 +537,15 @@ def canny_activity(cli, url, account_ref):
 
 
 def follow_up_tasks(bugs):
-    """取出看板 Agent 要处理的事项：待判断是否已告知客户的 CS 回复、待写入台账的回应记录。
+    """取出看板 Agent 要处理的事项：待语义判断的 Intercom CS 回复或 Canny 新评论、待写入台账的跟踪记录。
     会话原文只留在这里，不进入 Bug 明细。"""
     judge, record = [], []
     for bug in bugs:
         follow = bug.get('followUp') or {}
         candidates, base = follow.pop('candidates', None), follow.pop('record', None)
         if candidates:
-            judge.append({'issue': bug['identifier'], 'summary': bug['summary'], 'conversation': bug['sourceUrl'],
-                          'record': base, 'candidates': candidates})
+            judge.append({'issue': bug['identifier'], 'source': bug['source'], 'summary': bug['summary'],
+                          'sourceUrl': bug['sourceUrl'], 'record': base, 'candidates': candidates})
         if 'proposal' in follow:
             record.append(follow.pop('proposal'))
     return {'judge': judge, 'record': record}
