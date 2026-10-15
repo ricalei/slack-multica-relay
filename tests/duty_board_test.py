@@ -304,5 +304,51 @@ class BoardTests(unittest.TestCase):
         self.assertEqual([entry[0]['identifier'] for entry in board_module.attention(board, NOW)['notify']], ['N0'])
         self.assertIn('- 已上线待回告 1：[N0](https://m/N0)', board_module.render_slack(board, NOW))
 
+
+class HtmlTests(unittest.TestCase):
+    def test_scan_records_keep_judgement_fields_and_list_actionable_first(self):
+        index = {'records': [
+            {'state': 'non_bug', 'source': 'intercom', 'summary': 'S1', 'reason': 'R1', 'sourceUrl': 'javascript:alert(1)',
+             'moegoCompanyIds': ['118708'], 'customerSegments': {'tier': 'T1'}},
+            {'state': 'verification_blocked', 'source': 'canny', 'title': 'T2', 'sourceUrl': 'https://c/p/2',
+             'unresolvedGap': '缺原请求', 'csTickets': ['CS-1', 'not a key'], 'verifiedJiraKeys': ['MER-2', 'CS-1'],
+             'attempts': [{'path': 'redshift', 'query': 'company_id = 118708', 'result': '无记录'}, '读完原会话', 3]},
+        ]}
+        first, second = board_module.scan_records(index)
+        self.assertEqual((first['state'], first['summary']), ('verification_blocked', 'T2'))
+        self.assertEqual(first['tickets'], ['CS-1', 'MER-2'])
+        self.assertEqual(first['attempts'], ['redshift：无记录', '读完原会话'])
+        self.assertEqual(first['details'], [['待确认缺口', '缺原请求']])
+        self.assertEqual(second['sourceUrl'], '')
+        self.assertNotIn('118708', str([first, second]))
+
+    def test_scan_index_is_read_from_evidence_zip(self):
+        import json, tempfile, zipfile
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / 'GRM-1-evidence.zip'
+            with zipfile.ZipFile(archive, 'w') as handle:
+                handle.writestr('other.json', '{}')
+                handle.writestr('nested/scan-evidence-index.json', json.dumps({'targetDate': '2026-10-14', 'records': []}))
+            self.assertEqual(board_module.read_scan_index(archive)['targetDate'], '2026-10-14')
+            empty = Path(directory) / 'empty.zip'
+            with zipfile.ZipFile(empty, 'w') as handle:
+                handle.writestr('other.json', '{}')
+            self.assertIsNone(board_module.read_scan_index(empty))
+
+    def test_html_is_static_and_escapes_record_text(self):
+        board = board_module.build_board([], [], dt.date(2026, 10, 13), dt.date(2026, 10, 15))
+        scan = {'identifier': 'S1', 'records': board_module.scan_records(
+            {'records': [{'state': 'non_bug', 'summary': '</script><img src=x onerror=alert(1)>'}]})}
+        html = board_module.render_html(board_module.html_payload(board, NOW, scan, None, 'https://m/board', 'https://m/'))
+        self.assertEqual(html.count('</script>'), 1)
+        self.assertIn('&lt;/script&gt;&lt;img src=x onerror=alert(1)&gt;', html)
+        self.assertNotIn('<img', html)
+
+    def test_yesterday_without_scan_explains_missing_records(self):
+        board = board_module.build_board([], [], dt.date(2026, 10, 13), dt.date(2026, 10, 15))
+        scan, note = board_module.yesterday_scan(board, [])
+        self.assertIsNone(scan)
+        self.assertIn('2026-10-14 反馈日尚未扫描', note)
+
 if __name__ == '__main__':
     unittest.main()

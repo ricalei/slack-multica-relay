@@ -8,6 +8,8 @@ import re
 import subprocess
 import sys
 import tempfile
+import zipfile
+from html import escape
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -341,20 +343,37 @@ def attention_notes(board, now):
     return [attention_line(key, entries) for key, entries in attention(board, now).items() if entries]
 
 
+FUNNEL_HEADER = ['反馈日', '采集', '疑似候选', '确认 Bug', '不上线', '应上线', '已交付 PR', '已合并', '已上线', '已回告', '用户回应']
+
+
+def funnel_cells(board, row):
+    if row is board['trial']:
+        intake = ['–', '–']
+    else:
+        scanned = row.get('scanned', True)
+        intake = [_num(row['collected'], scanned), _suspected(row, scanned)]
+    cells = [row['label'], *intake]
+    cells += [str(row[key]) for key in ('confirmed', 'rejected', 'shouldShip', 'delivered', 'merged', 'released')]
+    return cells + [str(row['notified']), str(row['responded'])]
+
+
+def bug_status_text(bug):
+    state = STATE_LABELS[bug['state']]
+    if bug['state'] == 'released':
+        tags = '、'.join(sorted({pr['release']['tag'] for pr in bug['prs'] if pr.get('release')}))
+        state += f'（{tags}）'
+    if bug['state'] == 'rejected':
+        state += f"：{bug['rejection'].get('reason') or '原因未填'}"
+    return state
+
+
 def render_markdown(board, now):
-    header = ['反馈日', '采集', '疑似候选', '确认 Bug', '不上线', '应上线', '已交付 PR', '已合并', '已上线', '已回告', '用户回应']
+    header = FUNNEL_HEADER
     lines = [f"## 每日 Bug 值守看板｜截至 {board['through']} 反馈日", '',
              f"生成时间：{now.astimezone(TZ):%Y-%m-%d %H:%M}（Asia/Shanghai）。按反馈日分组，d1 = {board['start']}。", '',
              '### 漏斗', '', '| ' + ' | '.join(header) + ' |', '|' + '---|' * len(header)]
     def row_line(row, bold=False):
-        if row is board['trial']:
-            intake = ['–', '–']
-        else:
-            scanned = row.get('scanned', True)
-            intake = [_num(row['collected'], scanned), _suspected(row, scanned)]
-        cells = [row['label'], *intake]
-        cells += [str(row[key]) for key in ('confirmed', 'rejected', 'shouldShip', 'delivered', 'merged', 'released')]
-        cells += [str(row['notified']), str(row['responded'])]
+        cells = funnel_cells(board, row)
         if bold:
             cells = [f'**{cell}**' for cell in cells]
         return '| ' + ' | '.join(cells) + ' |'
@@ -369,12 +388,7 @@ def render_markdown(board, now):
               '', '### Bug 明细', '',
               '| Bug | 反馈日 | 来源 | 问题 | PR | 状态 | 回告 |', '|---|---|---|---|---|---|---|']
     for bug in board['bugs']:
-        state = STATE_LABELS[bug['state']]
-        if bug['state'] == 'released':
-            tags = '、'.join(sorted({pr['release']['tag'] for pr in bug['prs'] if pr.get('release')}))
-            state += f'（{tags}）'
-        if bug['state'] == 'rejected':
-            state += f"：{bug['rejection'].get('reason') or '原因未填'}"
+        state = bug_status_text(bug)
         source = f"[{bug['source']}]({bug['sourceUrl']})" if bug.get('sourceUrl') else bug['source']
         lines.append(f"| [{bug['identifier']}]({bug['url']}) | {bug['feedbackDate']} | {source} | "
                      f"{bug['summary']} | {_pr_links(bug)} | {state} | {notify_label(bug, now)} |")
@@ -595,6 +609,441 @@ def collect(args, now):
     return scans, bugs, warnings
 
 
+# ---------- HTML 版：Slack thread 附件 ----------
+
+# 扫描任务以固定文件名上传证据索引，单独作为附件或放在证据 zip 内。
+SCAN_INDEX_NAME = 'scan-evidence-index.json'
+SCAN_INDEX_MAX_BYTES = 20 * 1024 * 1024
+# 顺序即页面展示顺序：需要处理的在前，非 Bug 在后。
+RECORD_STATES = {
+    'confirmed': '确认可修', 'verification_blocked': '待验证/验证受阻', 'duplicate': '重复',
+    'cs_followed': '已有工单跟进', 'excluded_after_investigation': '调查后排除',
+    'product_decision': '产品/设计诉求', 'non_bug': '普通支持',
+}
+RECORD_DETAILS = (('unresolvedGap', '待确认缺口'), ('resumeCondition', '恢复条件'),
+                  ('correctBehaviorBasis', '正确行为依据'), ('observation', '动态观察'),
+                  ('verificationMethod', '验证方式'))
+TICKET_KEY = re.compile(r'[A-Z][A-Z0-9]{1,9}-\d+')
+
+
+def _https(value):
+    return value if isinstance(value, str) and re.match(r'https?://', value) else ''
+
+
+def _clip(value, limit):
+    return value[:limit] if isinstance(value, str) else ''
+
+
+def _attempt_text(attempt):
+    """结构化尝试只取路径与结果；查询语句可能带商家 ID，不进入页面。"""
+    if isinstance(attempt, str):
+        return _clip(attempt, 600)
+    if not isinstance(attempt, dict):
+        return ''
+    parts = [attempt.get('path') or attempt.get('method'), attempt.get('result')]
+    return _clip('：'.join(str(part) for part in parts if part), 600)
+
+
+def scan_records(index):
+    """证据索引 → 页面逐条记录。只保留排查与判断字段，不带商家 ID、客户分层与查询语句。"""
+    records = []
+    for record in index.get('records') or []:
+        if not isinstance(record, dict):
+            continue
+        tickets = [key for key in (record.get('csTickets') or []) + (record.get('verifiedJiraKeys') or [])
+                   if isinstance(key, str) and TICKET_KEY.fullmatch(key)]
+        records.append({
+            'state': _clip(record.get('state'), 60), 'source': _clip(record.get('source'), 30),
+            'summary': _clip(record.get('summary') or record.get('title') or record.get('evidenceId'), 240),
+            'reason': _clip(record.get('reason'), 600), 'sourceUrl': _https(record.get('sourceUrl')),
+            'details': [[label, _clip(record[key], 600)] for key, label in RECORD_DETAILS
+                        if isinstance(record.get(key), str) and record[key]],
+            'attempts': [text for text in map(_attempt_text, (record.get('attempts') or [])[:12]) if text],
+            'tickets': list(dict.fromkeys(tickets)),
+            'pr': _https(record.get('relatedPR') or record.get('pr')),
+        })
+    rank = {state: index for index, state in enumerate(RECORD_STATES)}
+    return sorted(records, key=lambda record: rank.get(record['state'], len(rank)))
+
+
+def read_scan_index(path):
+    if path.name == SCAN_INDEX_NAME:
+        return json.loads(path.read_text())
+    with zipfile.ZipFile(path) as archive:
+        # 只读取同名索引，不解压其它文件；超限的成员视为不可用。
+        members = [member for member in archive.infolist()
+                   if Path(member.filename).name == SCAN_INDEX_NAME and member.file_size <= SCAN_INDEX_MAX_BYTES]
+        return json.loads(archive.read(members[0])) if members else None
+
+
+def load_scan_index(identifier):
+    """取扫描任务最新上传的证据索引；找不到返回 None。"""
+    comments = run_json(['multica', 'issue', 'comment', 'list', identifier, '--output', 'json'])
+    comments = comments if isinstance(comments, list) else comments.get('comments', [])
+    attachments = [attachment for comment in sorted(comments, key=lambda item: item['created_at'], reverse=True)
+                   for attachment in comment.get('attachments') or []]
+    with tempfile.TemporaryDirectory() as directory:
+        for attachment in attachments:
+            name = attachment.get('filename') or ''
+            if name != SCAN_INDEX_NAME and not name.endswith('.zip'):
+                continue
+            subprocess.run(['multica', 'attachment', 'download', attachment['id'], '-o', directory],
+                           check=True, capture_output=True, text=True)
+            index = read_scan_index(Path(directory) / name)
+            if index is not None:
+                return index
+    return None
+
+
+def yesterday_scan(board, scans):
+    """昨日反馈日最新一次扫描的逐条记录；没有扫描或索引不可用时返回原因供页面说明。"""
+    candidates = [scan for scan in scans if scan.get('feedbackDate') == board['through']]
+    if not candidates:
+        return None, f"{board['through']} 反馈日尚未扫描，暂无逐条记录。"
+    scan = max(candidates, key=lambda item: item['createdAt'])
+    try:
+        index = load_scan_index(scan['identifier'])
+    except (subprocess.CalledProcessError, OSError, ValueError, zipfile.BadZipFile):
+        index = None
+    if not index or index.get('targetDate') not in (None, board['through']):
+        return None, f"{scan['identifier']} 没有可用的证据索引（{SCAN_INDEX_NAME}），暂无逐条记录。"
+    return {'identifier': scan['identifier'], 'records': scan_records(index)}, None
+
+
+RECORD_GROUPS = (('需要关注', ('verification_blocked', 'confirmed', 'duplicate')),
+                 ('已处理', ('cs_followed', 'excluded_after_investigation')),
+                 ('非 Bug', ('product_decision', 'non_bug')))
+DEFAULT_RECORD_STATE = 'verification_blocked'
+TODO_TAGS = {'notify': 'notify', 'responded': 'released', 'merged': 'review', 'review': 'review',
+             'pr_closed': 'rejected', 'fixing': 'review', 'unrejectable': 'review'}
+
+
+def _bug_note(bug, now, ages):
+    if bug['state'] == 'released':
+        return notify_label(bug, now)
+    if bug['state'] == 'rejected':
+        return bug['rejection'].get('reason') or '原因未填'
+    return ages.get(bug['identifier'], '')
+
+
+def html_payload(board, now, scan, scan_note, board_link=None, issue_url_base=''):
+    """HTML 版所需数据：与 Markdown/Slack 版同源，只做展示所需的整理。"""
+    items = attention(board, now)
+    ages = {bug['identifier']: note for key in ('review', 'merged') for bug, note in items[key] if note}
+    bugs = [{
+        'identifier': bug['identifier'], 'url': _https(bug['url']), 'summary': bug['summary'],
+        'feedbackDate': bug['feedbackDate'], 'trial': bug['feedbackDate'] < board['start'],
+        'source': bug.get('source') or '', 'sourceUrl': _https(bug.get('sourceUrl')), 'state': bug['state'],
+        'prs': [{'label': f"{pr['repo'].split('/')[-1]}#{pr['number']}", 'url': _https(pr['url'])} for pr in bug['prs']],
+        'releases': sorted({pr['release']['tag'] for pr in bug['prs'] if pr.get('release')}),
+        'note': _bug_note(bug, now, ages),
+    } for bug in board['bugs']]
+    todo = [{'key': key, 'title': ATTENTION_TITLES[key], 'identifier': bug['identifier'], 'url': _https(bug['url']),
+             'summary': bug['summary'], 'note': note or ''} for key, entries in items.items() for bug, note in entries]
+    return {
+        'through': board['through'], 'start': board['start'],
+        'generatedAt': f'{now.astimezone(TZ):%m-%d %H:%M}', 'boardLink': _https(board_link),
+        'rows': board['rows'], 'total': board['total'], 'bugs': bugs, 'todo': todo, 'warnings': board['warnings'],
+        'scan': scan and {**scan, 'url': _https(issue_url_base + scan['identifier'])}, 'scanNote': scan_note,
+    }
+
+
+def _h(value):
+    return escape(str(value), quote=True)
+
+
+def _a(text, url):
+    url = _https(url)
+    return f'<a href="{_h(url)}" target="_blank" rel="noopener">{_h(text)}</a>' if url else _h(text)
+
+
+def _tag(kind, text):
+    return f'<span class="tag t-{_h(kind)}">{_h(text)}</span>'
+
+
+def _html_top(payload):
+    total = payload['total']
+    link = f" · {_a('Multica 常驻看板', payload['boardLink'])}" if payload['boardLink'] else ''
+    stats = ''.join(f'<div><span>{label}</span><strong>{value}</strong></div>' for label, value in
+                    (('累计确认', total['confirmed']), ('已上线', total['released']), ('已回告', total['notified'])))
+    return (f'<header class="top"><div class="wrap"><div><h1>每日 Bug 值守｜{_h(payload["through"][5:])} 反馈日</h1>'
+            f'<p>三源扫描 → 疑似调查 → 确认可修 → 上线 · 生成于 {_h(payload["generatedAt"])}{link}</p></div>'
+            f'<div class="agg">{stats}</div></div></header>')
+
+
+def _record_counts(payload):
+    counts = {}
+    for record in (payload['scan'] or {}).get('records', []):
+        counts[record['state']] = counts.get(record['state'], 0) + 1
+    return counts
+
+
+def _html_funnel(payload):
+    latest, scan = (payload['rows'] or [None])[-1], payload['scan']
+    if not latest or not latest['scanned']:
+        body = f'<p class="empty">{_h(payload["through"])} 反馈日尚未扫描，扫描完成后的看板会显示漏斗。</p>'
+        return f'<section class="widget"><div class="head"><h2>昨日漏斗</h2></div>{body}</section>'
+    sources = latest.get('collectedBySource') or {}
+    split = ' · '.join(f'{_h(name.capitalize())} {count}' for name, count in
+                       sorted(sources.items(), key=lambda item: -item[1]))
+    stages = [('s1', '采集', _num(latest['collected']), split), ('s2', '疑似候选', _suspected(latest), '需要调查'),
+              ('s3', '确认可修', latest['confirmed'], '进入修复'), ('s4', '已上线', latest['released'], '本日反馈')]
+    flow = ''.join(f'<div class="stage {cls}"><b>{label}</b><strong>{_h(value)}</strong><small>{note}</small></div>'
+                   for cls, label, value, note in stages)
+    coverage = '三源采集完整' if latest.get('coverageComplete') else '来源覆盖不完整'
+    source = f"扫描任务 {_a(scan['identifier'], scan['url'])} · " if scan else ''
+    counts = _record_counts(payload)
+    foot = ''.join(f'<span>{_h(RECORD_STATES.get(state, state))} <b>{counts[state]}</b></span>'
+                   for state in RECORD_STATES if state != 'confirmed' and counts.get(state))
+    return (f'<section class="widget"><div class="head"><h2>昨日漏斗</h2><p>{source}{coverage}</p></div>'
+            f'<div class="flow">{flow}</div>' + (f'<div class="foot">{foot}</div>' if foot else '') + '</section>')
+
+
+def _html_todo(payload):
+    rows = ''.join(f'<li>{_tag(TODO_TAGS.get(item["key"], "review"), item["title"])}'
+                   f'{_a(item["identifier"] + " " + item["summary"], item["url"])}<span class="meta">{_h(item["note"])}</span></li>'
+                   for item in payload['todo'])
+    rows += ''.join(f'<li>{_tag("review", "数据说明")}<span>{_h(text)}</span><span></span></li>' for text in payload['warnings'])
+    count = len(payload['todo']) + len(payload['warnings'])
+    body = f'<ul class="todo">{rows}</ul>' if rows else '<p class="empty">今天没有需要你处理的事项。</p>'
+    return f'<section class="widget"><div class="head"><h2>需要你处理</h2><p>{count} 项</p></div>{body}</section>'
+
+
+def _html_bugs(payload):
+    lanes = []
+    for state in STATUS_ORDER:
+        bugs = [bug for bug in payload['bugs'] if bug['state'] == state]
+        if not bugs:
+            continue
+        rows = []
+        for bug in bugs:
+            origin = ' · '.join(filter(None, [bug['source'], bug['feedbackDate'][5:], '试运行' if bug['trial'] else '']))
+            prs = ' · '.join([_a(pr['label'], pr['url']) for pr in bug['prs']] + [_h(tag) for tag in bug['releases']]) or '–'
+            tag_kind = {'released': 'released', 'rejected': 'rejected'}.get(state)
+            note = _tag(tag_kind, bug['note']) if tag_kind and bug['note'] else _h(bug['note'])
+            rows.append(f'<div class="bug">{_a(bug["identifier"], bug["url"])}<div>{_h(bug["summary"])}'
+                        f'<span class="src">{_h(origin)}</span></div><div class="prs">{prs}</div><div class="note">{note}</div></div>')
+        lanes.append(f'<h3>{_h(STATE_LABELS[state].split(" ", 1)[-1])} {len(bugs)}</h3>' + ''.join(rows))
+    trial = sum(1 for bug in payload['bugs'] if bug['trial'])
+    sub = f"共 {len(payload['bugs'])} 个" + (f'，含试运行 {trial} 个' if trial else '')
+    body = f'<div class="lane">{"".join(lanes)}</div>' if lanes else '<p class="empty">暂无确认的 Bug。</p>'
+    return f'<section class="widget full"><div class="head"><h2>Bug 进度</h2><p>{sub}</p></div>{body}</section>'
+
+
+def _html_trend(payload):
+    rows, total = payload['rows'], payload['total']
+    peak = max([row['collected'] for row in rows if isinstance(row.get('collected'), int)] or [1]) or 1
+    def bar(row):
+        if not isinstance(row.get('collected'), int):
+            return ''
+        suspected = row['suspected'] if isinstance(row.get('suspected'), int) else 0
+        return (f'<div class="bar"><i style="width:{row["collected"] / peak * 100:.0f}%"></i>'
+                f'<i class="sus" style="width:{suspected / peak * 100:.0f}%"></i></div>')
+    def line(row, label, chart=True):
+        scanned = row.get('scanned', True)
+        cells = [label, _num(row['collected'], scanned), bar(row) if chart else '', _suspected(row, scanned),
+                 row['confirmed'], row['rejected'], row['released'], row['notified']]
+        return ''.join(f'<td>{cell if index == 2 else _h(cell)}</td>' for index, cell in enumerate(cells))
+    body = ''.join(f'<tr>{line(row, row["label"])}</tr>' for row in rows)
+    body += f'<tr class="total">{line(total, total["label"], chart=False)}</tr>'
+    head = ''.join(f'<th>{text}</th>' for text in ('反馈日', '采集', '采集 / 疑似', '疑似', '确认', '不上线', '已上线', '已回告'))
+    return (f'<section class="widget full"><div class="head"><h2>每日趋势</h2><p>按反馈日；试运行 Bug 只计入累计</p></div>'
+            f'<div class="scroll"><table class="days"><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div></section>')
+
+
+def _html_record(record):
+    side = ' · '.join(filter(None, [_h(record['source']), _a('原反馈', record['sourceUrl']) if record['sourceUrl'] else '',
+                                    _a('关联 PR', record['pr']) if record['pr'] else '']))
+    tickets = ''.join(_tag('cat', ticket) for ticket in record['tickets'])
+    head = (f'<div><div class="t">{_h(record["summary"])}</div>'
+            + (f'<div class="r">{_h(record["reason"])}</div>' if record['reason'] else '')
+            + f'</div><div class="side">{side}{tickets}</div>')
+    detail = ''.join(f'<div><em>{_h(label)}</em>{_h(text)}</div>' for label, text in record['details'])
+    if record['attempts']:
+        detail += '<div><em>已做尝试</em>' + '；'.join(_h(text) for text in record['attempts']) + '</div>'
+    search = ' '.join([record['summary'], record['reason'], *record['tickets']]).lower()
+    attrs = (f'class="item" data-state="{_h(record["state"])}" data-source="{_h(record["source"])}" '
+             f'data-search="{_h(search)}"')
+    if detail:
+        return f'<details {attrs}><summary>{head}</summary><div class="detail">{detail}</div></details>'
+    return f'<div {attrs}><div class="row">{head}</div></div>'
+
+
+def _html_records(payload):
+    scan = payload['scan']
+    title = '<div class="head"><h2>昨日逐条记录</h2>'
+    if not scan:
+        return f'<section class="widget full">{title}</div><p class="empty">{_h(payload["scanNote"] or "暂无逐条记录。")}</p></section>'
+    records, counts = scan['records'], _record_counts(payload)
+    grouped = {state for _, states in RECORD_GROUPS for state in states}
+    groups = list(RECORD_GROUPS) + [('其他', tuple(state for state in counts if state not in grouped))]
+    nav = ''
+    for index, (name, states) in enumerate(groups):
+        # 「需要关注」组即使为 0 也展示，便于确认当天没有新增可修或重复。
+        present = [state for state in states if index == 0 or state in counts]
+        if not present:
+            continue
+        nav += f'<div class="group">{_h(name)}</div>' + ''.join(
+            f'<button type="button" data-key="{_h(state)}">{_h(RECORD_STATES.get(state, state))}'
+            f'<span>{counts.get(state, 0)}</span></button>' for state in present)
+    nav += f'<button type="button" data-key="">全部<span>{len(records)}</span></button>'
+    sources = ''.join(f'<option value="{_h(source)}">{_h(source)}</option>'
+                      for source in sorted({record['source'] for record in records}))
+    tools = ('<div class="tools js-only"><input type="search" id="q" placeholder="搜索摘要、原因或工单号" aria-label="搜索记录">'
+             f'<select id="src" aria-label="来源"><option value="">全部来源</option>{sources}</select></div>')
+    items = ''.join(_html_record(record) for record in records)
+    return (f'<section class="widget full" id="records">{title}<p>{len(records)} 条 · 来自 {_a(scan["identifier"], scan["url"])}'
+            f' · 待验证不等于没有 Bug</p></div><div class="rec"><nav class="cats" aria-label="分类">{nav}</nav><div>'
+            f'{tools}<div id="list">{items}</div><p class="empty" id="none" hidden>没有匹配的记录。</p>'
+            f'<div class="pager js-only" id="pager"></div></div></div></section>')
+
+
+def render_html(payload):
+    """静态生成全部内容，不依赖脚本即可阅读；脚本只负责分类切换、搜索与分页。"""
+    title = f"每日 Bug 值守｜{payload['through'][5:]} 反馈日"
+    body = (_html_top(payload) + '<main><div class="wrap"><div class="grid">' + _html_funnel(payload)
+            + _html_todo(payload) + '</div>' + _html_bugs(payload) + _html_trend(payload) + _html_records(payload)
+            + '<footer>已上线：PR 合并提交包含在「Release to PRODUCTION」成功运行的 release 标签中；无该流程的仓库合并即视为就绪。'
+            '不上线：审查人在交付 thread 上点 🚫。</footer></div></main>')
+    return (HTML_TEMPLATE.replace('__TITLE__', _h(title)).replace('__DEFAULT__', DEFAULT_RECORD_STATE)
+            .replace('__BODY__', body))
+
+
+HTML_TEMPLATE = r'''<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>
+:root{--ink:#243235;--muted:#637477;--faint:#8a9a9c;--line:#d8e1df;--line-soft:#e8eeee;--page:#f4f7f6;--white:#fff;
+--teal:#146d70;--teal-soft:#e6f1f0;--orange:#c9774f;--orange-soft:#f8ede6;--green:#367b5e;--green-soft:#e9f3ee;
+--red:#a8513e;--red-soft:#f6e9e5;--amber:#9a6a1f;--amber-soft:#f6efe1}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--page);color:var(--ink);font:14px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC","Segoe UI",sans-serif;font-variant-numeric:tabular-nums}
+a{color:var(--teal);text-decoration:none}a:hover{text-decoration:underline;text-underline-offset:3px}
+a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:3px solid var(--teal);outline-offset:2px}
+.wrap{width:min(1280px,calc(100% - 40px));margin:auto}
+.top{background:var(--white);border-bottom:1px solid var(--line)}
+.top .wrap{display:flex;justify-content:space-between;align-items:flex-end;gap:24px;padding:24px 0 20px}
+.top h1{font-size:24px;line-height:1.2;margin:0;font-weight:600;letter-spacing:-.01em}
+.top p{margin:6px 0 0;color:var(--muted);font-size:13px}
+.agg{display:flex;gap:28px}.agg div{text-align:right}.agg span{display:block;color:var(--muted);font-size:12px}
+.agg strong{font-size:22px;font-weight:600}
+main{padding:22px 0 56px}
+.grid{display:grid;grid-template-columns:minmax(0,1.75fr) minmax(0,1fr);gap:18px;align-items:start}
+.widget{background:var(--white);border:1px solid var(--line);border-radius:6px;padding:20px 22px 18px;min-width:0}
+.full{margin-top:18px}
+.head{display:flex;justify-content:space-between;align-items:baseline;gap:12px}
+.head h2{font-size:17px;margin:0;font-weight:600}.head p{margin:0;color:var(--muted);font-size:12px}
+.empty{color:var(--muted);margin:14px 0 0}
+.flow{display:grid;grid-template-columns:38fr 26fr 18fr 18fr;align-items:center;height:184px;margin:18px 0 14px}
+.stage{color:#fff;height:100%;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;padding:0 12px}
+.s1{background:var(--teal);clip-path:polygon(0 0,calc(100% - 12px) 0,100% 50%,calc(100% - 12px) 100%,0 100%)}
+.s2{height:76%;background:#3f8a86;clip-path:polygon(0 0,calc(100% - 11px) 0,100% 50%,calc(100% - 11px) 100%,0 100%,11px 50%)}
+.s3{height:58%;background:var(--orange);clip-path:polygon(0 0,calc(100% - 10px) 0,100% 50%,calc(100% - 10px) 100%,0 100%,10px 50%)}
+.s4{height:46%;background:var(--green);clip-path:polygon(0 0,100% 0,100% 100%,0 100%,9px 50%)}
+.stage b{font-size:12px;font-weight:600}
+.stage strong{font-size:42px;line-height:1.05;font-weight:650;margin-top:4px}
+.s3 strong,.s4 strong{font-size:34px}
+.stage small{font-size:11px;opacity:.88;margin-top:6px;line-height:1.35}
+.foot{display:flex;flex-wrap:wrap;gap:6px 16px;border-top:1px solid var(--line-soft);padding-top:12px;color:var(--muted);font-size:12px}
+.foot b{color:var(--ink);font-weight:600}
+.todo{list-style:none;margin:14px 0 0;padding:0}
+.todo li{display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:center;padding:10px 0;border-top:1px solid var(--line-soft)}
+.todo li:first-child{border-top:0}.todo .meta{color:var(--muted);font-size:12px}
+.tag{display:inline-block;font-size:11px;font-weight:600;padding:2px 7px;border-radius:3px;white-space:nowrap}
+.t-notify{background:var(--orange-soft);color:#8a4c2e}.t-review{background:var(--amber-soft);color:var(--amber)}
+.t-released{background:var(--green-soft);color:var(--green)}.t-rejected{background:var(--red-soft);color:var(--red)}
+.t-cat{background:var(--teal-soft);color:var(--teal);margin-left:6px}
+.lane{margin-top:8px}.lane h3{font-size:12px;color:var(--muted);font-weight:600;margin:14px 0 4px}
+.bug{display:grid;grid-template-columns:76px minmax(0,1fr) minmax(0,1.1fr) 170px;gap:14px;align-items:baseline;padding:9px 0;border-top:1px solid var(--line-soft);font-size:13px}
+.bug .src{color:var(--faint);font-size:12px;margin-left:6px}.bug .prs{color:var(--muted);font-size:12px}
+.bug .note{color:var(--muted);font-size:12px;text-align:right}.bug .note .tag{white-space:normal;text-align:left}
+.scroll{overflow-x:auto}
+.days{width:100%;border-collapse:collapse;margin-top:12px;font-size:13px}
+.days th{text-align:left;color:var(--muted);font-weight:500;font-size:12px;padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+.days td{padding:9px 8px;border-bottom:1px solid var(--line-soft);vertical-align:middle;white-space:nowrap}
+.days td:nth-child(3){width:34%}
+.days .bar{height:8px;border-radius:2px;background:var(--line-soft);position:relative;min-width:160px}
+.days .bar i{position:absolute;inset:0 auto 0 0;background:#9cc3c1;border-radius:2px}.days .bar i.sus{background:var(--orange)}
+.days tr.total td{font-weight:600;border-bottom:0}
+.rec{display:grid;grid-template-columns:200px minmax(0,1fr);gap:22px;margin-top:14px}
+.cats{position:sticky;top:12px;align-self:start;display:flex;flex-direction:column;gap:2px}
+.cats button{all:unset;display:flex;justify-content:space-between;padding:7px 10px;border-radius:4px;font-size:13px;color:var(--ink)}
+.cats button span{color:var(--muted)}.cats .group{font-size:11px;color:var(--faint);margin:10px 10px 2px}
+.js .cats button{cursor:pointer}.js .cats button:hover{background:var(--page)}
+.cats button.on{background:var(--teal-soft);color:var(--teal);font-weight:600}
+.js-only{display:none}.js .js-only{display:flex}
+.tools{gap:8px;margin-bottom:6px}
+.tools input{flex:1;font:inherit;color:inherit;border:1px solid var(--line);border-radius:4px;padding:7px 10px;background:var(--white)}
+.tools select{font:inherit;color:inherit;border:1px solid var(--line);border-radius:4px;padding:7px 8px;background:var(--white)}
+.item{border-top:1px solid var(--line-soft);padding:11px 0}
+.item summary,.item .row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px}
+.item summary{list-style:none;cursor:pointer}.item summary::-webkit-details-marker{display:none}
+.item .t{font-weight:500}.item .r{color:var(--muted);font-size:13px;margin-top:2px;max-width:72ch}
+.item .side{text-align:right;font-size:12px;color:var(--faint);white-space:nowrap}
+.item .detail{margin-top:8px;padding:8px 12px;background:var(--page);border-radius:4px;font-size:13px;max-width:80ch}
+.item .detail div{margin:3px 0}.item .detail em{font-style:normal;color:var(--muted);margin-right:8px}
+.pager{justify-content:space-between;align-items:center;color:var(--muted);font-size:12px;margin-top:12px}
+.pager button{font:inherit;color:inherit;border:1px solid var(--line);background:var(--white);border-radius:4px;padding:5px 10px;margin-left:6px;cursor:pointer}
+.pager button:disabled{opacity:.4;cursor:default}
+footer{margin-top:20px;color:var(--muted);font-size:12px}
+@media(max-width:900px){.grid,.rec{grid-template-columns:1fr}.cats{position:static;flex-direction:row;flex-wrap:wrap}
+.cats .group{width:100%}.bug{grid-template-columns:70px minmax(0,1fr)}.bug .prs,.bug .note{grid-column:2;text-align:left}
+.top .wrap{flex-direction:column;align-items:flex-start}.agg{gap:16px}.flow{height:150px}.stage strong{font-size:30px}}
+</style>
+</head>
+<body>
+__BODY__
+<script>
+(function () {
+  var list = document.getElementById('list');
+  if (!list) return;
+  document.documentElement.classList.add('js');
+  var items = Array.prototype.slice.call(list.children);
+  var buttons = Array.prototype.slice.call(document.querySelectorAll('.cats button'));
+  var query = document.getElementById('q'), source = document.getElementById('src');
+  var pager = document.getElementById('pager'), none = document.getElementById('none');
+  var state = {category: '__DEFAULT__', page: 0}, PAGE = 30;
+  if (!buttons.some(function (button) { return button.dataset.key === state.category; })) state.category = '';
+  function draw() {
+    var q = query.value.trim().toLowerCase(), s = source.value;
+    var hits = items.filter(function (node) {
+      return (!state.category || node.dataset.state === state.category) && (!s || node.dataset.source === s)
+        && (!q || node.dataset.search.indexOf(q) >= 0);
+    });
+    var pages = Math.max(1, Math.ceil(hits.length / PAGE));
+    state.page = Math.min(state.page, pages - 1);
+    items.forEach(function (node) { node.hidden = true; });
+    hits.slice(state.page * PAGE, (state.page + 1) * PAGE).forEach(function (node) { node.hidden = false; });
+    none.hidden = hits.length > 0;
+    buttons.forEach(function (button) { button.classList.toggle('on', button.dataset.key === state.category); });
+    var label = document.createElement('span');
+    label.textContent = hits.length + ' 条 · 第 ' + (state.page + 1) + ' / ' + pages + ' 页';
+    var nav = document.createElement('span');
+    [['上一页', -1, state.page === 0], ['下一页', 1, state.page >= pages - 1]].forEach(function (item) {
+      var button = document.createElement('button');
+      button.type = 'button'; button.textContent = item[0]; button.disabled = item[2];
+      button.addEventListener('click', function () { state.page += item[1]; draw(); });
+      nav.appendChild(button);
+    });
+    pager.replaceChildren(label, nav);
+  }
+  buttons.forEach(function (button) {
+    button.addEventListener('click', function () { state.category = button.dataset.key; state.page = 0; draw(); });
+  });
+  query.addEventListener('input', function () { state.page = 0; draw(); });
+  source.addEventListener('change', function () { state.page = 0; draw(); });
+  draw();
+})();
+</script>
+</body>
+</html>
+'''
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--project', required=True, help='每日 Bug 值守项目 ID')
@@ -623,6 +1072,9 @@ def main(argv=None):
     (output / 'board.json').write_text(json.dumps(board, ensure_ascii=False, indent=2))
     (output / 'board.md').write_text(render_markdown(board, now))
     (output / 'slack.md').write_text(render_slack(board, now, args.board_link))
+    scan, scan_note = yesterday_scan(board, scans)
+    (output / 'board.html').write_text(
+        render_html(html_payload(board, now, scan, scan_note, args.board_link, args.issue_url_base)))
     print(json.dumps({'output': str(output), 'warnings': board['warnings'],
                       'followUpTasks': {key: len(value) for key, value in tasks.items()}}, ensure_ascii=False))
 
