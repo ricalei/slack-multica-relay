@@ -220,9 +220,11 @@ def build_board(scans, bugs, start, today):
         return sum(values) if values and all(isinstance(value, int) for value in values) else None
     in_window = [bug for bug in bugs if start.isoformat() <= bug['feedbackDate'] <= yesterday.isoformat()]
     excluded = f"，不含未扫描 {'、'.join(date[5:] for date in unscanned)}" if unscanned else ''
-    total = {'label': f'累计（d1–d{len(rows)}{excluded}）', 'collected': total_of('collected'),
+    # Bug 各层与「Bug 现状」同口径，包含试运行；采集与疑似只有 start 起的扫描数据。
+    with_trial = f'，Bug 含试运行 {len(trial_bugs)} 个' if trial_bugs else ''
+    total = {'label': f'累计（d1–d{len(rows)}{excluded}{with_trial}）', 'collected': total_of('collected'),
              'suspected': total_of('suspected'), 'suspectedEstimated': any(row['suspectedEstimated'] for row in rows),
-             'unscanned': unscanned, 'excludedNote': excluded, **_layers(in_window)}
+             'unscanned': unscanned, 'scopeNote': excluded + with_trial, **_layers(trial_bugs + in_window)}
     warnings = [warning for scan in latest_scan.values() for warning in scan_warnings(scan)]
     return {'start': start.isoformat(), 'through': yesterday.isoformat(), 'rows': rows, 'trial': trial,
             'total': total, 'bugs': sorted(bugs, key=lambda bug: (bug['feedbackDate'], bug['identifier'])),
@@ -394,7 +396,7 @@ def render_slack(board, now, board_link=None):
         if items[key]:
             lines.append(attention_line(key, items[key]))
     total = board['total']
-    lines += ['', f"**累计（{board['start'][5:]} 起{total['excludedNote']}）**：{intake(total)} · 已上线 {total['released']} 个"
+    lines += ['', f"**累计（{board['start'][5:]} 起{total['scopeNote']}）**：{intake(total)} · 已上线 {total['released']} 个"
               f" · 已回告 {total['notified']} 个 · 客户回应 {total['responded']} 个"]
     unrejectable = items['unrejectable']
     notes = [f'- {warning}' for warning in board['warnings']]

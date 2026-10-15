@@ -201,7 +201,9 @@ class BoardTests(unittest.TestCase):
                          (3, 1, 2, 2, 2, 1))
         self.assertEqual(board['trial']['confirmed'], 1)
         total = board['total']
-        self.assertEqual((total['collected'], total['suspected'], total['confirmed']), (15, None, 3))
+        self.assertEqual((total['collected'], total['suspected'], total['confirmed']), (15, None, 4))
+        self.assertIn('，Bug 含试运行 1 个', total['label'])
+        self.assertIn('**累计（10-12 起，Bug 含试运行 1 个）**', board_module.render_slack(board, NOW))
 
     def test_latest_scan_wins_and_missing_day_is_unscanned(self):
         scans = [
