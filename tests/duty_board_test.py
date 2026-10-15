@@ -114,30 +114,30 @@ class FollowUpTests(unittest.TestCase):
 
     def canny(self, score, *comments):
         return {'post': {'score': score}, 'comments': [
-            {'id': cid, 'createdAt': created, 'authorId': author, 'parentId': parent, 'internal': internal, 'private': False}
-            for cid, created, author, parent, internal in comments]}
+            {'id': cid, 'createdAt': created, 'authorId': 'a', 'authorName': name, 'parentId': None,
+             'internal': internal, 'private': False, 'text': f'text {cid}'}
+            for cid, created, name, internal in comments]}
 
-    def test_canny_first_read_records_reply_author_and_baseline(self):
-        activity = self.canny(5, ('c0', '2026-10-10T00:00:00Z', 'cust', None, False),
-                              ('c1', '2026-10-13T23:00:00Z', 'moego', None, False),
-                              ('c2', '2026-10-13T23:30:00Z', 'cust', 'c1', False))
+    def test_canny_new_public_comments_go_to_semantic_judgment_with_baseline(self):
+        activity = self.canny(5, ('c0', '2026-10-13T23:00:00Z', 'Winches', False),
+                              ('c1', '2026-10-14T03:00:00.5Z', 'Cust', False),
+                              ('c2', '2026-10-14T04:00:00Z', 'Staff', True))
         result = self.run_follow_up(activity, source='canny')
         self.assertEqual((result['state'], result['scoreDelta']), ('awaiting_customer', 0))
-        self.assertEqual({key: result['proposal'][key] for key in ('notifyAt', 'replyAuthorId', 'baselineScore', 'respondedAt')},
-                         {'notifyAt': self.NOTIFY['at'], 'replyAuthorId': 'moego', 'baselineScore': 5, 'respondedAt': None})
+        self.assertEqual(result['candidates'], [{'commentId': 'c1', 'at': '2026-10-14T03:00:00Z', 'author': 'Cust',
+                                                 'isReply': False, 'text': 'text c1'}])
+        self.assertEqual({key: result['record'][key] for key in ('baselineScore', 'judgedThrough', 'respondedAt')},
+                         {'baselineScore': 5, 'judgedThrough': None, 'respondedAt': None})
 
-    def test_canny_other_authors_public_comment_after_notify_is_response(self):
-        record = {'issue': 'B1', 'kind': 'notify-followup', 'notifyAt': self.NOTIFY['at'],
-                  'replyAuthorId': 'moego', 'baselineScore': 5, 'respondedAt': None}
-        quiet = self.canny(8, ('c3', '2026-10-14T05:00:00Z', 'moego', None, False),
-                           ('c4', '2026-10-14T06:00:00Z', 'staff', None, True))
-        result = self.run_follow_up(quiet, record, source='canny')
-        self.assertEqual((result['state'], result['scoreDelta'], 'proposal' in result), ('awaiting_customer', 3, False))
-        answered = self.canny(8, ('c5', '2026-10-14T09:00:00.123Z', 'cust', 'c3', False),
-                              ('c6', '2026-10-14T07:00:00Z', 'cust2', None, False))
-        result = self.run_follow_up(answered, record, source='canny')
-        self.assertEqual((result['state'], result['respondedAt']), ('responded', '2026-10-14T07:00:00Z'))
-        self.assertEqual(result['proposal']['respondedAt'], '2026-10-14T07:00:00Z')
+    def test_canny_baseline_is_proposed_when_nothing_to_judge_and_judged_point_skips_old(self):
+        quiet = self.canny(7, ('c0', '2026-10-13T23:00:00Z', 'Winches', False))
+        result = self.run_follow_up(quiet, source='canny')
+        self.assertEqual(result['proposal']['baselineScore'], 7)
+        record = {**result['proposal'], 'judgedThrough': '2026-10-14T03:00:00Z'}
+        later = self.canny(9, ('c1', '2026-10-14T03:00:00Z', 'Cust', False), ('c3', '2026-10-14T05:00:00Z', 'Cust', False))
+        result = self.run_follow_up(later, record, source='canny')
+        self.assertEqual(([item['commentId'] for item in result['candidates']], result['scoreDelta']), (['c3'], 2))
+        self.assertNotIn('proposal', result)
 
     def test_awaiting_cs_lists_public_admin_replies_after_notify_and_after_judged_point(self):
         parts = [self.part('a0', -1), self.part('n1', 1, part_type='note'), self.part('b1', 2, author='bot'),
