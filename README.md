@@ -82,7 +82,7 @@ Cloudflare 使用 `pnpm dev:cf`、`pnpm build:cf` 和 `pnpm deploy:cf`，共享�
 
 ## 每日值守看板
 
-`scripts/duty-board.py` 只读汇总「GRM 每日 Bug 值守」的反馈日漏斗：读取值守项目任务、字段台账任务 GRM-664 的 `<!-- duty-board:v1 -->` 评论、GitHub PR 与「Release to PRODUCTION」运行（兼容 cherry-pick 发布线）、Slack 交付 thread 上审查人的 🚫，以及下节的回告记录与回应跟踪，输出 `board.json`、`board.md`、`slack.md`。「GRM 每日值守看板」Agent（Prompt 真源 [DUTY-BOARD-PROMPT.md](DUTY-BOARD-PROMPT.md)）由 Autopilot 每天 10:00 运行 `origin/main` 版本，发送到指定交付频道并追加到 GRM-665。本地预览：
+`scripts/duty-board.py` 只读汇总「GRM 每日 Bug 值守」的反馈日漏斗：读取值守项目任务、字段台账任务 GRM-664 的 `<!-- duty-board:v1 -->` 评论、GitHub PR 与「Release to PRODUCTION」运行（兼容 cherry-pick 发布线）、Slack 交付 thread 上审查人的 🚫，以及下节的回告记录与回应跟踪，输出 `board.json`、`board.md`、`slack.md`，以及含昨日扫描逐条记录、可直接打开的 `board.html`。「GRM 每日值守看板」Agent（Prompt 真源 [DUTY-BOARD-PROMPT.md](DUTY-BOARD-PROMPT.md)）由 Autopilot 每天 10:00 运行 `origin/main` 版本，发送到指定交付频道、在该消息 thread 上传 `board.html`，并追加到 GRM-665。本地预览：
 
 ```bash
 python3 scripts/duty-board.py --project <值守项目 ID> --ledger-issue GRM-664 --start 2026-10-12 --reviewer <审查人 Slack 用户 ID> --canny-account-ref <Canny 内部测试账号 aid> --output-dir <输出目录>
