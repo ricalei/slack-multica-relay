@@ -23,6 +23,9 @@ BOARD_JSON = re.compile(r'```json\n([\s\S]*?)\n```')
 SCAN_SPLIT = ('nonBug', 'productDecision', 'csFollowed', 'suspected')
 SCAN_OUTCOMES = ('confirmed', 'duplicate', 'verificationBlocked', 'excludedAfterInvestigation')
 FOLLOW_UP_DAYS = 14
+# 各来源 notify-followup 记录的跟踪字段，respondedAt 为共用的客户回应时间。
+FOLLOW_UP_FIELDS = {'intercom': ('judgedThrough', 'csInformedAt', 'csInformedPartId'),
+                    'canny': ('replyAuthorId', 'baselineScore')}
 STATE_LABELS = {
     'rejected': '⛔ 不上线', 'released': '🟢 已上线', 'merged': '🟡 已合并待上线',
     'review': '⚪ 待审', 'pr_closed': '⚠️ PR 已关闭未合并', 'fixing': '🔧 修复中',
@@ -95,6 +98,25 @@ def notify_state(notify):
     return state if state in ('sent', 'skipped') else 'pending'
 
 
+def canny_follow_up(notify, record, activity, base):
+    """Canny 评论没有官方标识：首次跟踪时把回告前最新一条顶层评论的作者记为回告账号，并记录当时票数为基准；
+    之后其他作者的公开新评论算客户回应，票数变化只作参考。"""
+    at = _parse(notify['at'])
+    comments = [item for item in activity['comments'] if not item['internal'] and not item['private']]
+    proposal = None
+    if record.get('baselineScore') is None:
+        ours = [item for item in comments if not item['parentId'] and _parse(item['createdAt']) <= at]
+        record = proposal = {**record, 'replyAuthorId': ours[-1]['authorId'] if ours else None,
+                             'baselineScore': activity['post']['score']}
+    replies = sorted(_parse(item['createdAt']) for item in comments
+                     if _parse(item['createdAt']) > at and item['authorId'] != record['replyAuthorId'])
+    if replies:
+        responded = replies[0].strftime('%Y-%m-%dT%H:%M:%SZ')
+        return {'state': 'responded', 'respondedAt': responded, 'proposal': {**record, 'respondedAt': responded}}
+    result = {'state': 'awaiting_customer', **base, 'scoreDelta': activity['post']['score'] - record['baselineScore']}
+    return {**result, 'proposal': proposal} if proposal else result
+
+
 def _iso(timestamp):
     return dt.datetime.fromtimestamp(timestamp, dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
@@ -115,11 +137,11 @@ def follow_up(source, notify, record, read, now):
     返回 {'state', 'candidates': 待判断的 CS 回复, 'proposal': 待写入台账的记录}。"""
     if source == 'facebook':
         return {'state': 'untracked'}
-    if source != 'intercom':
+    if source not in FOLLOW_UP_FIELDS:
         return {'state': 'not_integrated'}
     record = record if record and record.get('notifyAt') == notify['at'] else {
         'issue': notify['issue'], 'kind': 'notify-followup', 'notifyAt': notify['at'],
-        'judgedThrough': None, 'csInformedAt': None, 'csInformedPartId': None, 'respondedAt': None}
+        **dict.fromkeys(FOLLOW_UP_FIELDS[source]), 'respondedAt': None}
     if record.get('respondedAt'):
         return {'state': 'responded', 'respondedAt': record['respondedAt']}
     deadline = _parse(notify['at']) + dt.timedelta(days=FOLLOW_UP_DAYS)
@@ -129,6 +151,8 @@ def follow_up(source, notify, record, read, now):
     parts = read()
     if parts is None:
         return {'state': 'unread', **base}
+    if source == 'canny':
+        return canny_follow_up(notify, record, parts, base)
     if not record.get('csInformedAt'):
         since = _parse(record.get('judgedThrough') or notify['at'])
         candidates = [{'partId': part['id'], 'at': _iso(part['created_at']), 'text': part['text'][:2000]}
@@ -265,11 +289,18 @@ def notify_label(bug, now):
         return f"不回告：{bug.get('notifyReason') or '原因未填'}"
     follow = bug.get('followUp') or {}
     state = follow.get('state')
-    left = f"（剩 {max(0, (_parse(follow['deadline']) - now).days)} 天）" if follow.get('deadline') else ''
+    days = max(0, (_parse(follow['deadline']) - now).days) if follow.get('deadline') else None
+    left = f'（剩 {days} 天）' if days is not None else ''
     if state == 'responded':
         return f"客户有回应（{_parse(follow['respondedAt']).astimezone(TZ):%m-%d}）"
+    if state == 'expired' and bug['source'] == 'canny':
+        return '客户无回应（已截止）'
     if state == 'expired':
         return 'CS 已告知，客户无回应（已截止）' if follow.get('csInformedAt') else 'CS 未告知客户（已截止）'
+    if state == 'awaiting_customer':
+        notes = ([f"票数 {follow['scoreDelta']:+d}"] if follow.get('scoreDelta') else []) + (
+            [f'剩 {days} 天'] if days is not None else [])
+        return '已回告，待客户回应' + (f"（{'，'.join(notes)}）" if notes else '')
     return {'untracked': '已回告（Facebook 不跟踪回应）', 'not_integrated': '已回告（回应识别未接入）',
             'unread': '已回告（会话读取失败）', 'awaiting_cs': f'已回告，待 CS 告知客户{left}',
             'cs_informed': f'CS 已告知，待客户回应{left}'}.get(state, '已回告')
@@ -354,7 +385,7 @@ def render_markdown(board, now):
         '- 已上线：PR 合并提交已包含在「Release to PRODUCTION」成功运行的 release 标签中；无该流程的仓库合并即视为就绪。',
         '- 不上线：审查人在 Bug 交付 thread 上点 🚫；原因取其以 🚫 开头的最新回复。',
         f'- 已回告：台账有发送记录；用户回应：Intercom 须 CS 回复确实告知客户已修复上线后，客户再有消息才算。'
-        f'从回告起跟踪 {FOLLOW_UP_DAYS} 天；Facebook 不跟踪回应，Canny 尚未接入。']
+        f'Canny 以回告后其他作者的公开新评论为回应，票数变化只作参考。从回告起跟踪 {FOLLOW_UP_DAYS} 天；Facebook 不跟踪回应。']
     return '\n'.join(lines) + '\n'
 
 
@@ -496,6 +527,17 @@ def intercom_parts(cli, url):
         return None
 
 
+def canny_activity(cli, url, account_ref):
+    """经 moe-feedback-collector 只读读取 Canny 帖子票数与评论元数据；读取失败返回 None。"""
+    if not url:
+        return None
+    command = ['uv', 'run', '-q', '--script', cli, 'canny-post', '--url', url]
+    try:
+        return run_json(command + (['--account-ref', account_ref] if account_ref else []))
+    except (subprocess.CalledProcessError, json.JSONDecodeError):
+        return None
+
+
 def follow_up_tasks(bugs):
     """取出看板 Agent 要处理的事项：待判断是否已告知客户的 CS 回复、待写入台账的回应记录。
     会话原文只留在这里，不进入 Bug 明细。"""
@@ -543,10 +585,14 @@ def collect(args, now):
             if bug['notify'] == 'skipped':
                 bug['notifyReason'] = notify.get('reason')
             if bug['notify'] == 'sent':
+                def read():
+                    if bug['source'] == 'canny':
+                        return canny_activity(args.collector_cli, bug['sourceUrl'], args.canny_account_ref)
+                    return intercom_parts(args.intercom_cli, bug['sourceUrl'])
                 bug['followUp'] = follow_up(bug['source'], notify, ledger.get((issue['identifier'], 'notify-followup')),
-                                            lambda: intercom_parts(args.intercom_cli, bug['sourceUrl']), now)
+                                            read, now)
                 if bug['followUp']['state'] == 'unread':
-                    warnings.append(f"{issue['identifier']} Intercom 会话读取失败，回应状态未更新")
+                    warnings.append(f"{issue['identifier']} {bug['source']} 来源读取失败，回应状态未更新")
         bugs.append(bug)
     return scans, bugs, warnings
 
@@ -560,6 +606,9 @@ def main(argv=None):
     parser.add_argument('--reviewer', required=True, help='有权用 🚫 标注不上线的 Slack 用户 ID')
     parser.add_argument('--slack-cli', default=os.path.expanduser('~/.agents/skills/slack/scripts/slack.py'))
     parser.add_argument('--intercom-cli', default=os.path.expanduser('~/.agents/skills/intercom/scripts/intercom.py'))
+    parser.add_argument('--collector-cli', default=os.path.expanduser(
+        '~/.agents/skills/moe-feedback-collector/scripts/moe_feedback_collector.py'))
+    parser.add_argument('--canny-account-ref', default='', help='Canny 需要续登时的内部测试账号 aid:<id>')
     parser.add_argument('--issue-url-base', default='https://multica.devops.moego.dev/grm/issues/')
     parser.add_argument('--board-link', help='常驻看板任务链接，附在 Slack 版末尾')
     parser.add_argument('--output-dir', required=True)

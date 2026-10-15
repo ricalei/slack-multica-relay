@@ -20,13 +20,14 @@
    ```bash
    python3 <工作目录>/duty-board.py --project 724dce94-a8b9-44e7-8390-9c3cbdac7bc0 \
      --ledger-issue GRM-664 --start 2026-10-12 --reviewer <审查人 Slack 用户 ID> \
+     --canny-account-ref aid:13156918 \
      --board-link https://multica.devops.moego.dev/grm/issues/GRM-665 --output-dir <工作目录>/out
    ```
 
-   脚本需要的 Multica、GitHub（`gh`）、Slack 与 Intercom Skill 读取能力沿用 Runtime 已有身份。脚本失败时记录命令与 stderr 摘要后结束，不手工统计或拼凑数字。
+   脚本需要的 Multica、GitHub（`gh`）、Slack、Intercom Skill 与 moe-feedback-collector 读取能力沿用 Runtime 已有身份；已回告的 Canny 帖子经 collector `canny-post` 只读读取，需要时由其按既有方式以内部测试账号 `aid:13156918` 续登，不发表评论或投票。脚本失败时记录命令与 stderr 摘要后结束，不手工统计或拼凑数字。
    回应跟踪：读取 `out/board.json` 的 `followUpTasks`，`judge` 与 `record` 都为空时直接进入下一步。
    - `judge` 每项是一个已回告的 Intercom Bug（`summary` 为问题摘要）与回告后 CS 的新公开回复 `candidates`。逐条判断 CS 是否明确告诉客户这个问题已经修复上线（或修复后已可正常使用）；回答其它问题、寒暄、仍在排查或承诺稍后处理都不算。上下文不足时可经 intercom skill `get-conversation` 只读补读该会话。生成新记录：以该项 `record` 为基础，`judgedThrough` 设为全部 candidates 中最晚的 `at`；有符合的回复时，`csInformedAt`、`csInformedPartId` 取其中最早一条的 `at` 与 `partId`，没有则保持原值。
-   - `record` 每项是脚本已确认的客户回应记录，原样写入。
+   - `record` 每项是脚本已确认的跟踪记录（客户回应，或 Canny 首次跟踪的回告账号与票数基准），原样写入。
    - 把本轮全部新记录作为一个 JSON 数组，以首行 `<!-- duty-board:v1 -->`、一句说明和 ```json 代码块追加到 GRM-664，用 `--content-file` 传入并回读解析。说明与评论中不引用会话原文、客户或客服姓名。随后用同一命令重跑脚本；重跑后仍有 `record` 时按同样方式再写一次并重跑，最多重跑 2 次，仍有待处理项时在最终答复说明。后续步骤只使用最后一次运行的输出。
 4. 核对输出：读取 `out/board.json`、`out/board.md`、`out/slack.md`，确认标题中的截至日期等于 today 前一天，三份输出数字一致。脚本给出的数字、状态与 warnings 原样发布，不改写、不补充推测；warnings 已在看板「数据说明」和 Slack「需要关注」中。
 5. 去重：读取 GRM-665 评论，以及 Slack 频道最近一天由当前 Bot 发送的消息。已有相同「截至 YYYY-MM-DD 反馈日」标题的看板时视为本日已发布，不重复发送或评论，直接答复已有链接并结束；只缺其中一处时只补缺失的那一处。
