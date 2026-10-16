@@ -1,5 +1,7 @@
 import datetime as dt
 import importlib.util
+import json
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -24,28 +26,17 @@ def bug(identifier, date, state, prs=None):
             'prs': prs if prs is not None else [pr('open')], 'state': state}
 
 
-class ReleaseTests(unittest.TestCase):
-    def test_picks_earliest_successful_run_containing_merge_commit(self):
-        runs = [
-            {'created_at': '2026-10-14T10:00:00Z', 'head_sha': 'late', 'head_branch': 'release-261014.8', 'updated_at': 'T2'},
-            {'created_at': '2026-10-14T08:00:00Z', 'head_sha': 'before', 'head_branch': 'release-261014.6', 'updated_at': 'T0'},
-            {'created_at': '2026-10-14T09:00:00Z', 'head_sha': 'first', 'head_branch': 'release-261014.7', 'updated_at': 'T1'},
-        ]
-        contained = {'first', 'late'}
-        release = board_module.find_release('m', runs, lambda base, head: head in contained)
-        self.assertEqual(release['tag'], 'release-261014.7')
+class GitHubTests(unittest.TestCase):
+    def test_merged_pr_needs_no_actions_or_release_queries(self):
+        github = board_module.GitHub()
+        with patch.object(github, 'api', return_value={
+            'state': 'closed', 'merged_at': '2026-10-14T00:00:00Z',
+            'created_at': '2026-10-13T00:00:00Z',
+        }) as api:
+            result = github.pr('https://github.com/o/r/pull/7')
+        self.assertEqual(result['state'], 'merged')
+        api.assert_called_once_with('repos/o/r/pulls/7')
 
-    def test_contains_by_ancestry_or_cherry_picked_pr_title(self):
-        def commit(title):
-            return {'commit': {'message': f'{title}\n\nbody'}}
-        self.assertTrue(board_module.compare_contains({'status': 'identical', 'commits': []}, 7))
-        diverged = {'status': 'diverged', 'commits': [commit('fix: other (#71)'), commit('fix: target (#7)')]}
-        self.assertTrue(board_module.compare_contains(diverged, 7))
-        self.assertFalse(board_module.compare_contains(diverged, 1))
-
-    def test_no_release_when_no_run_contains_commit(self):
-        runs = [{'created_at': 'a', 'head_sha': 'x', 'head_branch': 't', 'updated_at': 'u'}]
-        self.assertIsNone(board_module.find_release('m', runs, lambda base, head: False))
 
 
 class LedgerTests(unittest.TestCase):
@@ -197,14 +188,15 @@ class FollowUpTests(unittest.TestCase):
 
 
 class BugStateTests(unittest.TestCase):
-    def test_rejection_overrides_pr_progress(self):
-        self.assertEqual(board_module.bug_state([pr('merged', release={'tag': 't'})], True), 'rejected')
+    def test_rejection_preserves_confirmation_but_does_not_override_all_merged(self):
+        self.assertEqual(board_module.bug_state([pr('open')], True), 'rejected')
+        self.assertEqual(board_module.bug_state([pr('merged')], True), 'released')
 
-    def test_released_requires_every_deployable_pr_released_and_ignores_libraries(self):
-        library = pr('merged', deployable=False)
-        self.assertEqual(board_module.bug_state([library, pr('merged', release={'tag': 't'})], False), 'released')
-        self.assertEqual(board_module.bug_state([library, pr('merged', release={'tag': 't'}), pr('merged')], False), 'merged')
-        self.assertEqual(board_module.bug_state([library], False), 'merged')
+    def test_released_requires_every_pr_merged_without_release_workflows(self):
+        self.assertEqual(board_module.bug_state([pr('merged'), pr('merged')], False), 'released')
+        self.assertEqual(board_module.bug_state([pr('merged', deployable=False)], False), 'released')
+        self.assertEqual(board_module.bug_state([pr('merged'), pr('open')], False), 'review')
+        self.assertEqual(board_module.bug_state([pr('merged'), pr('closed')], False), 'pr_closed')
 
     def test_open_closed_and_missing_prs(self):
         self.assertEqual(board_module.bug_state([pr('merged'), pr('open')], False), 'review')
@@ -213,30 +205,33 @@ class BugStateTests(unittest.TestCase):
 
 
 class BoardTests(unittest.TestCase):
-    def test_groups_by_feedback_date_with_trial_row_and_excludes_today(self):
+    def test_groups_by_batch_feedback_date_and_excludes_outside_window(self):
         scans = [
-            {'identifier': 'S1', 'feedbackDate': '2026-10-12', 'createdAt': '2026-10-13T01:00:00Z',
+            {'identifier': 'S1', 'feedbackDate': '2026-10-12', 'createdAt': '2026-10-13T01:00:00Z', 'scanDate': '2026-10-13',
              'collected': {'canny': 2, 'intercom': 8}, 'suspected': 4, 'coverageComplete': True},
-            {'identifier': 'S2', 'feedbackDate': '2026-10-13', 'createdAt': '2026-10-14T01:00:00Z',
+            {'identifier': 'S2', 'feedbackDate': '2026-10-13', 'createdAt': '2026-10-14T01:00:00Z', 'scanDate': '2026-10-14',
              'collected': {'canny': 5}, 'suspected': None, 'coverageComplete': True},
         ]
         bugs = [
             bug('B0', '2026-10-02', 'review'),
             bug('B1', '2026-10-13', 'released', [pr('merged', release={'tag': 't'})]),
             bug('B2', '2026-10-13', 'rejected', [pr('open')]),
-            bug('B3', '2026-10-13', 'merged', [pr('merged')]),
+            bug('B3', '2026-10-13', 'released', [pr('merged')]),
             bug('B4', '2026-10-14', 'review'),
         ]
         board = board_module.build_board(scans, bugs, dt.date(2026, 10, 12), dt.date(2026, 10, 14))
         self.assertEqual([row['date'] for row in board['rows']], ['2026-10-12', '2026-10-13'])
         d2 = board['rows'][1]
         self.assertEqual((d2['confirmed'], d2['rejected'], d2['shouldShip'], d2['delivered'], d2['merged'], d2['released']),
-                         (3, 1, 2, 2, 2, 1))
-        self.assertEqual(board['trial']['confirmed'], 1)
+                         (3, 1, 2, 3, 2, 2))
+        self.assertIsNone(board['trial'])
+        self.assertEqual([item['identifier'] for item in board['bugs']], ['B1', 'B2', 'B3'])
+        self.assertEqual(board['rows'][0]['scanDate'], '2026-10-13')
+        self.assertIn('10-13 扫描（10-12 反馈）', board['rows'][0]['label'])
         total = board['total']
-        self.assertEqual((total['collected'], total['suspected'], total['confirmed']), (15, None, 4))
-        self.assertIn('，Bug 含试运行 1 个', total['label'])
-        self.assertIn('**累计（10-12 起，Bug 含试运行 1 个）**', board_module.render_slack(board, NOW))
+        self.assertEqual((total['collected'], total['suspected'], total['confirmed']), (15, None, 3))
+        self.assertNotIn('试运行', total['label'])
+        self.assertIn('**累计（10-12 起）**', board_module.render_slack(board, NOW))
 
     def test_latest_scan_wins_and_missing_day_is_unscanned(self):
         scans = [
@@ -267,7 +262,7 @@ class BoardTests(unittest.TestCase):
         self.assertEqual(board_module.scan_warnings(scan), [])
 
     def test_status_lines_list_each_bug_once_and_truncate_accumulating_states(self):
-        released = [bug(f'R{index}', f'2026-10-0{index}', 'released', [pr('merged', release={'tag': 't'})])
+        released = [bug(f'R{index}', '2026-10-13', 'released', [pr('merged', release={'tag': 't'})])
                     for index in range(1, 8)]
         board = board_module.build_board([], released + [bug('W1', '2026-10-13', 'review')],
                                          dt.date(2026, 10, 13), dt.date(2026, 10, 14))
@@ -290,11 +285,11 @@ class BoardTests(unittest.TestCase):
 
     def test_attention_lists_pending_states_and_unrejectable_bugs(self):
         no_message = {**bug('B2', '2026-10-13', 'review'), 'deliveryPermalink': None}
-        board = board_module.build_board([], [bug('B1', '2026-10-13', 'merged', [pr('merged')]), no_message],
+        board = board_module.build_board([], [{**bug('B1', '2026-10-13', 'released', [pr('merged')]), 'notify': 'pending'}, no_message],
                                          dt.date(2026, 10, 13), dt.date(2026, 10, 14))
         items = board_module.attention(board, NOW)
-        self.assertEqual([entry[0]['identifier'] for entry in items['merged']], ['B1'])
-        self.assertEqual(items['merged'][0][1], '1 天')
+        self.assertEqual([entry[0]['identifier'] for entry in items['notify']], ['B1'])
+        self.assertEqual(items['review'][0][1], '2 天')
         self.assertEqual([entry[0]['identifier'] for entry in items['unrejectable']], ['B2'])
 
     def test_released_bugs_without_notify_record_need_notify(self):
@@ -304,6 +299,70 @@ class BoardTests(unittest.TestCase):
         board = board_module.build_board([], bugs, dt.date(2026, 10, 13), dt.date(2026, 10, 14))
         self.assertEqual([entry[0]['identifier'] for entry in board_module.attention(board, NOW)['notify']], ['N0'])
         self.assertIn('- 已上线待回告 1：[N0](https://m/N0)', board_module.render_slack(board, NOW))
+
+
+class CohortTests(unittest.TestCase):
+    def test_real_batch_attribution_excludes_older_batch_and_retains_rejected_confirmations(self):
+        scans = [
+            {'id': 'batch12', 'identifier': 'GRM-621', 'title': 'scan', 'created_at': '2026-10-13T01:00:00Z',
+             'metadata': {'dailyScan': {'targetDate': '2026-10-12'}}},
+            {'id': 'batch13', 'identifier': 'GRM-635', 'title': 'scan', 'created_at': '2026-10-14T01:00:00Z',
+             'metadata': {'dailyScan': {'targetDate': '2026-10-13'}}},
+            {'id': 'old', 'identifier': 'GRM-602', 'title': 'old', 'created_at': '2026-10-11T03:00:00Z', 'metadata': {}},
+        ]
+        issues, entries = list(scans), []
+        for scan in scans[:2]:
+            entries.append({'issue': scan['identifier'], 'kind': 'scan',
+                            'feedbackDate': scan['metadata']['dailyScan']['targetDate'],
+                            'collected': {'canny': 10}, 'suspected': 4})
+        for key, parent, source_date in [('GRM-632', 'batch12', '2026-10-05'),
+                                         ('GRM-633', 'batch12', '2026-10-03'),
+                                         ('GRM-634', 'batch12', '2026-10-02'),
+                                         ('GRM-636', 'batch13', '2026-10-13'),
+                                         ('GRM-603', 'old', '2026-09-28')]:
+            issues.append({'id': key, 'identifier': key, 'title': f'每日 Bug 值守｜{key}',
+                           'created_at': '2026-10-15T01:00:00Z', 'parent_issue_id': parent,
+                           'metadata': {'dailyBug': json.dumps({'mode': 'bug', 'batchId': parent})}})
+            entries.append({'issue': key, 'kind': 'bug', 'feedbackDate': source_date,
+                            'source': 'canny', 'prs': [key], 'delivery': {'permalink': key}})
+        comments = [{'created_at': '2026-10-15', 'content': board_module.BOARD_MARKER
+                     + '\n```json\n' + json.dumps(entries) + '\n```'}]
+        args = SimpleNamespace(start='2026-10-12', today='2026-10-15', project='p', ledger_issue='L',
+                               issue_url_base='https://m/', reviewer=REVIEWER, slack_cli='slack')
+        def read_pr(key):
+            self.assertNotEqual(key, 'GRM-603', 'out-of-window PRs must not be queried')
+            return pr('open' if key in ('GRM-633', 'GRM-634') else 'merged')
+        def thread(key):
+            if key in ('GRM-633', 'GRM-634'):
+                return [{'reactions': [{'name': 'no_entry_sign', 'users': [REVIEWER]}]}]
+            return []
+        with patch.object(board_module, 'load_issues', return_value=issues), \
+             patch.object(board_module, 'run_json', return_value=comments), \
+             patch.object(board_module.GitHub, 'pr', side_effect=read_pr) as prs, \
+             patch.object(board_module, 'slack_thread', side_effect=lambda cli, url: thread(url)):
+            collected, bugs, warnings = board_module.collect(args, NOW)
+        self.assertEqual(warnings, [])
+        self.assertEqual(prs.call_count, 4)
+        board = board_module.build_board(collected, bugs, dt.date(2026, 10, 12), dt.date(2026, 10, 15))
+        first, second = board['rows'][:2]
+        self.assertEqual((first['scanDate'], first['confirmed'], first['released']), ('2026-10-13', 3, 1))
+        self.assertEqual((second['scanDate'], second['confirmed'], second['released']), ('2026-10-14', 1, 1))
+        self.assertEqual((board['total']['confirmed'], board['total']['released']), (4, 2))
+        self.assertEqual(board['total']['delivered'], 4)
+        for render in (board_module.render_markdown, board_module.render_slack):
+            text = render(board, NOW)
+            self.assertNotIn('GRM-603', text)
+            self.assertNotIn('Release to PRODUCTION', text)
+        self.assertEqual(bugs[0]['sourceFeedbackDate'], '2026-10-05')
+        self.assertEqual(bugs[0]['feedbackDate'], '2026-10-12')
+
+    def test_batch_date_uses_shanghai_timezone_and_missing_link_is_not_guessed(self):
+        batch = {'identifier': 'S1', 'created_at': '2026-10-13T17:00:00Z',
+                 'metadata': {'dailyScan': {'targetDate': '2026-10-13'}}}
+        issue = {'parent_issue_id': 's', 'metadata': {'dailyBug': {'mode': 'bug'}}}
+        self.assertEqual(board_module.bug_cohort(issue, {'s': batch}, {})['scanDate'], '2026-10-14')
+        self.assertIsNone(board_module.bug_cohort(issue, {}, {}))
+
 
 
 class HtmlTests(unittest.TestCase):
@@ -368,9 +427,9 @@ class HtmlTests(unittest.TestCase):
         early, latest = payloads[1:]
         self.assertEqual(early['scan']['records'][0]['summary'], 'S-NEW')
         self.assertEqual(early['rows'][-1]['collected'], 8)
-        self.assertEqual(early['total']['confirmed'], 2)
-        self.assertEqual([item['identifier'] for item in early['bugs']], ['TRIAL', 'EARLY'])
-        self.assertEqual({item['identifier'] for item in early['todo']}, {'EARLY', 'TRIAL'})
+        self.assertEqual(early['total']['confirmed'], 1)
+        self.assertEqual([item['identifier'] for item in early['bugs']], ['EARLY'])
+        self.assertEqual({item['identifier'] for item in early['todo']}, {'EARLY'})
         self.assertIn('全局读取告警', early['warnings'])
         self.assertEqual(latest['total'], board['total'])
         self.assertIsNone(payloads[0]['scan'])
