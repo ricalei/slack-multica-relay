@@ -62,9 +62,10 @@ mc workspace get "$mc_workspace" --output json
 
 ## 调整智能体
 
-1. `agent get` 锁定 Agent ID、工作区、当前 `instructions` 和待改字段；修改前重新读取，现状已变化时先重算差异。
-2. 先准备完整候选内容并核对差异，再执行 `agent update`，仅传本次要修改的字段。`--instructions` 替换整份 prompt，不是追加；保留现有未涉及的规则。
-3. 更新后再次 `agent get`，核对目标字段与候选值一致；Skill 绑定改动用 `agent skills list` 回读。配置保存不等于运行或 Slack 回复已经完成，不为验证配置擅自触发任务。
+1. Multica 改动先提 PR 再同步：先在本仓库修改对应源文件并创建 PR，PR 创建后才执行线上写入；改动依赖其他仓库（如共享 Skill）时，该仓库同样先提 PR。
+2. `agent get` 锁定 Agent ID、工作区、当前 `instructions` 和待改字段；修改前重新读取，现状已变化时先重算差异。
+3. 先准备完整候选内容并核对差异，再执行 `agent update`，仅传本次要修改的字段。`--instructions` 替换整份 prompt，不是追加；保留现有未涉及的规则。
+4. 更新后再次 `agent get`，核对目标字段与候选值一致；Skill 绑定改动用 `agent skills list` 回读。配置保存不等于运行或 Slack 回复已经完成，不为验证配置擅自触发任务。
 
 常用参数（使用前读取 `mc agent update --help`）：
 
@@ -100,5 +101,5 @@ PY
 ## 本项目资料与验证
 
 - 链路和验证命令读 `README.md`；配置及部署读 `SETUP-GUIDE.zh-CN.md`；恢复与幂等边界读 `REVIEW.md`。
-- `AGENT-PROMPT.md` 仅是 `Slack Task Router (Codex)` 的 Prompt 真源。调整任一智能体 Prompt 时，对照该目标的线上 `instructions` 与其独立维护的源文件，保留线上新增且仍有效的规则；文件变更不会自动同步到 Multica，发布必须显式使用 CLI 并回读。
+- `AGENT-PROMPT.md` 仅是 `Slack Task Router (Codex)` 的 Prompt 真源。调整任一智能体 Prompt 时，对照该目标的线上 `instructions` 与其独立维护的源文件，保留线上新增且仍有效的规则并回写到源文件；文件变更不会自动同步到 Multica，发布必须显式使用 CLI 并回读。
 - 安装依赖：`pnpm install --frozen-lockfile`；业务代码变更：`pnpm test`、`pnpm lint`。仅修改操作文档时核对 CLI 帮助、相关只读命令和 `git diff --check`，不为文档验证执行线上写入。
