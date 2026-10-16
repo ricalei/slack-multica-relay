@@ -14,7 +14,6 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 TZ = ZoneInfo('Asia/Shanghai')
-PROD_WORKFLOW = 'Release to PRODUCTION'
 REJECT_EMOJI = 'no_entry_sign'
 REJECT_PREFIXES = ('🚫', ':no_entry_sign:')
 PR_URL = re.compile(r'https://github\.com/([^/]+/[^/]+)/pull/(\d+)')
@@ -29,20 +28,12 @@ FOLLOW_UP_DAYS = 14
 FOLLOW_UP_FIELDS = {'intercom': ('judgedThrough', 'csInformedAt', 'csInformedPartId'),
                     'canny': ('judgedThrough', 'baselineScore', 'respondedCommentId')}
 STATE_LABELS = {
-    'rejected': '⛔ 不上线', 'released': '🟢 已上线', 'merged': '🟡 已合并待上线',
+    'rejected': '⛔ 不上线', 'released': '🟢 已上线',
     'review': '⚪ 待审', 'pr_closed': '⚠️ PR 已关闭未合并', 'fixing': '🔧 修复中',
 }
 
 
 # ---------- 纯逻辑：上线、🚫、漏斗 ----------
-
-def find_release(merge_sha, runs, contains):
-    """runs 为合并后成功的生产发布运行；返回最早包含该合并提交的那次。"""
-    for run in sorted(runs, key=lambda item: item['created_at']):
-        if contains(merge_sha, run['head_sha']):
-            return {'tag': run['head_branch'], 'at': run['updated_at'], 'url': run.get('html_url')}
-    return None
-
 
 def ledger_entries(comments):
     """台账任务评论 → {(任务编号, kind): 字段}。每条带标记的评论含一个 JSON 对象或数组，
@@ -65,16 +56,6 @@ def ledger_entries(comments):
                 else:
                     errors.append(f"台账评论 {comment.get('id')} 有缺少 issue 的记录")
     return entries, errors
-
-
-def compare_contains(compare, number):
-    """compare 为 GitHub compare(合并提交...发布标签) 结果。
-    部分仓库（如 Boarding_Desktop）发布线 cherry-pick PR 提交，SHA 不同但标题保留 (#PR号)。"""
-    if compare['status'] in ('ahead', 'identical'):
-        return True
-    suffix = f'(#{number})'
-    return any(commit['commit']['message'].split('\n', 1)[0].rstrip().endswith(suffix)
-               for commit in compare.get('commits') or [])
 
 
 def rejection(messages, reviewer, emoji=REJECT_EMOJI):
@@ -169,19 +150,16 @@ def follow_up(source, notify, record, read, now):
 
 
 def bug_state(prs, rejected):
+    # 上线按关联 PR 全部 merged 判断；历史驳回标记不覆盖实际合并结果。
+    if prs and all(pr['state'] == 'merged' for pr in prs):
+        return 'released'
     if rejected:
         return 'rejected'
     if not prs:
         return 'fixing'
     if any(pr['state'] == 'closed' for pr in prs):
         return 'pr_closed'
-    if any(pr['state'] == 'open' for pr in prs):
-        return 'review'
-    deployable = [pr for pr in prs if pr['deployable']]
-    # 没有生产发布流程的仓库（如共享库）合并即就绪；Bug 需全部可部署 PR 都已上线。
-    if deployable and all(pr.get('release') for pr in deployable):
-        return 'released'
-    return 'merged'
+    return 'review'
 
 
 def scan_warnings(scan):
@@ -205,8 +183,8 @@ def _layers(bugs):
         'confirmed': len(bugs),
         'rejected': len(bugs) - len(alive),
         'shouldShip': len(alive),
-        'delivered': sum(1 for bug in alive if bug['prs']),
-        'merged': sum(1 for bug in alive if bug['state'] in ('merged', 'released')),
+        'delivered': sum(1 for bug in bugs if bug['prs']),
+        'merged': sum(1 for bug in alive if bug['state'] == 'released'),
         'released': sum(1 for bug in alive if bug['state'] == 'released'),
         'notified': sum(1 for bug in alive if bug.get('notify') == 'sent'),
         'responded': sum(1 for bug in alive if (bug.get('followUp') or {}).get('state') == 'responded'),
@@ -214,8 +192,9 @@ def _layers(bugs):
 
 
 def build_board(scans, bugs, start, today):
-    """按反馈日分组：start 之前的 Bug 归入试运行；统计到 today 前一天为止。"""
+    """按所属扫描批次的反馈日归组，展示扫描日；范围外 Bug 不进入明细或累计。"""
     yesterday = today - dt.timedelta(days=1)
+    bugs = [bug for bug in bugs if start.isoformat() <= bug['feedbackDate'] <= yesterday.isoformat()]
     latest_scan = {}
     for scan in sorted(scans, key=lambda item: item['createdAt']):
         latest_scan[scan['feedbackDate']] = scan
@@ -224,8 +203,13 @@ def build_board(scans, bugs, start, today):
         key = day.isoformat()
         scan = latest_scan.get(key)
         collected = scan.get('collected') if scan else None
+        scan_day = scan.get('scanDate') if scan else None
+        period = f'{day:%m-%d} 反馈'
+        if scan_day:
+            period = f'{scan_day[5:]} 扫描（{period}）'
+        label = f'd{(day - start).days + 1} · {period}'
         rows.append({
-            'label': f'd{(day - start).days + 1} · {day:%m-%d}', 'date': key, 'scanned': scan is not None,
+            'label': label, 'date': key, 'scanDate': scan_day, 'scanned': scan is not None,
             'collected': sum(collected.values()) if isinstance(collected, dict) else None,
             'collectedBySource': collected, 'suspected': scan.get('suspected') if scan else None,
             'suspectedEstimated': bool(scan and scan.get('suspectedEstimated')),
@@ -233,8 +217,6 @@ def build_board(scans, bugs, start, today):
             **_layers([bug for bug in bugs if bug['feedbackDate'] == key]),
         })
         day += dt.timedelta(days=1)
-    trial_bugs = [bug for bug in bugs if bug['feedbackDate'] < start.isoformat()]
-    trial = {'label': '试运行（回溯）', 'collected': None, 'suspected': None, **_layers(trial_bugs)} if trial_bugs else None
     # 扫描晚于看板或当日扫描失败时该反馈日未扫描；累计只合计已扫描的反馈日并注明排除项，
     # 避免一天未扫描就让整列累计显示缺失。已扫描但台账缺字段仍按缺失处理。
     scanned_rows = [row for row in rows if row['scanned']]
@@ -242,15 +224,12 @@ def build_board(scans, bugs, start, today):
     def total_of(key):
         values = [row[key] for row in scanned_rows]
         return sum(values) if values and all(isinstance(value, int) for value in values) else None
-    in_window = [bug for bug in bugs if start.isoformat() <= bug['feedbackDate'] <= yesterday.isoformat()]
     excluded = f"，不含未扫描 {'、'.join(date[5:] for date in unscanned)}" if unscanned else ''
-    # Bug 各层与「Bug 现状」同口径，包含试运行；采集与疑似只有 start 起的扫描数据。
-    with_trial = f'，Bug 含试运行 {len(trial_bugs)} 个' if trial_bugs else ''
-    total = {'label': f'累计（d1–d{len(rows)}{excluded}{with_trial}）', 'collected': total_of('collected'),
+    total = {'label': f'累计（d1–d{len(rows)}{excluded}）', 'collected': total_of('collected'),
              'suspected': total_of('suspected'), 'suspectedEstimated': any(row['suspectedEstimated'] for row in rows),
-             'unscanned': unscanned, 'scopeNote': excluded + with_trial, **_layers(trial_bugs + in_window)}
+             'unscanned': unscanned, 'scopeNote': excluded, **_layers(bugs)}
     warnings = [warning for scan in latest_scan.values() for warning in scan_warnings(scan)]
-    return {'start': start.isoformat(), 'through': yesterday.isoformat(), 'rows': rows, 'trial': trial,
+    return {'start': start.isoformat(), 'through': yesterday.isoformat(), 'rows': rows, 'trial': None,
             'total': total, 'bugs': sorted(bugs, key=lambda bug: (bug['feedbackDate'], bug['identifier'])),
             'warnings': warnings}
 
@@ -307,7 +286,7 @@ def notify_label(bug, now):
 
 
 def attention(board, now):
-    items = {'notify': [], 'responded': [], 'merged': [], 'review': [], 'pr_closed': [], 'unrejectable': [], 'fixing': []}
+    items = {'notify': [], 'responded': [], 'review': [], 'pr_closed': [], 'unrejectable': [], 'fixing': []}
     for bug in board['bugs']:
         state = bug['state']
         follow = bug.get('followUp') or {}
@@ -315,9 +294,6 @@ def attention(board, now):
             items['notify'].append((bug, None))
         elif follow.get('state') == 'responded' and now - _parse(follow['respondedAt']) <= dt.timedelta(days=1):
             items['responded'].append((bug, None))
-        elif state == 'merged':
-            merged = max((pr['mergedAt'] for pr in bug['prs'] if pr.get('mergedAt')), default=None)
-            items['merged'].append((bug, _age(merged, now)))
         elif state == 'review':
             created = min((pr['createdAt'] for pr in bug['prs'] if pr['state'] == 'open'), default=None)
             items['review'].append((bug, _age(created, now)))
@@ -329,7 +305,7 @@ def attention(board, now):
 
 
 ATTENTION_TITLES = {
-    'notify': '已上线待回告', 'responded': '已回告有新回应', 'merged': '已合并待上线', 'review': '待审 PR', 'pr_closed': 'PR 已关闭未合并且未标 🚫',
+    'notify': '已上线待回告', 'responded': '已回告有新回应', 'review': '待审 PR', 'pr_closed': 'PR 已关闭未合并且未标 🚫',
     'fixing': '已确认尚无 PR', 'unrejectable': '无交付消息，无法用 🚫 标注',
 }
 
@@ -343,15 +319,12 @@ def attention_notes(board, now):
     return [attention_line(key, entries) for key, entries in attention(board, now).items() if entries]
 
 
-FUNNEL_HEADER = ['反馈日', '采集', '疑似候选', '确认 Bug', '不上线', '应上线', '已交付 PR', '已合并', '已上线', '已回告', '用户回应']
+FUNNEL_HEADER = ['扫描日（反馈日）', '采集', '疑似候选', '确认可修', '不上线', '应上线', '已交付 PR', '已合并', '已上线', '已回告', '用户回应']
 
 
 def funnel_cells(board, row):
-    if row is board['trial']:
-        intake = ['–', '–']
-    else:
-        scanned = row.get('scanned', True)
-        intake = [_num(row['collected'], scanned), _suspected(row, scanned)]
+    scanned = row.get('scanned', True)
+    intake = [_num(row['collected'], scanned), _suspected(row, scanned)]
     cells = [row['label'], *intake]
     cells += [str(row[key]) for key in ('confirmed', 'rejected', 'shouldShip', 'delivered', 'merged', 'released')]
     return cells + [str(row['notified']), str(row['responded'])]
@@ -359,9 +332,6 @@ def funnel_cells(board, row):
 
 def bug_status_text(bug):
     state = STATE_LABELS[bug['state']]
-    if bug['state'] == 'released':
-        tags = '、'.join(sorted({pr['release']['tag'] for pr in bug['prs'] if pr.get('release')}))
-        state += f'（{tags}）'
     if bug['state'] == 'rejected':
         state += f"：{bug['rejection'].get('reason') or '原因未填'}"
     return state
@@ -370,15 +340,13 @@ def bug_status_text(bug):
 def render_markdown(board, now):
     header = FUNNEL_HEADER
     lines = [f"## 每日 Bug 值守看板｜截至 {board['through']} 反馈日", '',
-             f"生成时间：{now.astimezone(TZ):%Y-%m-%d %H:%M}（Asia/Shanghai）。按反馈日分组，d1 = {board['start']}。", '',
+             f"生成时间：{now.astimezone(TZ):%Y-%m-%d %H:%M}（Asia/Shanghai）。按所属扫描批次归组，d1 反馈日 = {board['start']}。", '',
              '### 漏斗', '', '| ' + ' | '.join(header) + ' |', '|' + '---|' * len(header)]
     def row_line(row, bold=False):
         cells = funnel_cells(board, row)
         if bold:
             cells = [f'**{cell}**' for cell in cells]
         return '| ' + ' | '.join(cells) + ' |'
-    if board['trial']:
-        lines.append(row_line(board['trial']))
     lines += [row_line(row) for row in board['rows']]
     lines.append(row_line(board['total'], bold=True))
     sources = [f"{row['label']}：" + '、'.join(f'{k} {v}' for k, v in row['collectedBySource'].items())
@@ -386,29 +354,30 @@ def render_markdown(board, now):
                for row in board['rows'] if isinstance(row.get('collectedBySource'), dict)]
     lines += ['', '来源拆分：' + ('；'.join(sources) or '–'),
               '', '### Bug 明细', '',
-              '| Bug | 反馈日 | 来源 | 问题 | PR | 状态 | 回告 |', '|---|---|---|---|---|---|---|']
+              '| Bug | 扫描日 | 批次反馈日 | 来源 | 问题 | PR | 状态 | 回告 |', '|---|---|---|---|---|---|---|---|']
     for bug in board['bugs']:
         state = bug_status_text(bug)
         source = f"[{bug['source']}]({bug['sourceUrl']})" if bug.get('sourceUrl') else bug['source']
-        lines.append(f"| [{bug['identifier']}]({bug['url']}) | {bug['feedbackDate']} | {source} | "
+        lines.append(f"| [{bug['identifier']}]({bug['url']}) | {bug.get('scanDate') or '–'} | {bug['feedbackDate']} | {source} | "
                      f"{bug['summary']} | {_pr_links(bug)} | {state} | {notify_label(bug, now)} |")
     lines += ['', '### 需要关注', ''] + (attention_notes(board, now) or ['- 无'])
     lines += ['', '### 数据说明', ''] + [f'- {warning}' for warning in board['warnings']] + [
-        '- 已上线：PR 合并提交已包含在「Release to PRODUCTION」成功运行的 release 标签中；无该流程的仓库合并即视为就绪。',
-        '- 不上线：审查人在 Bug 交付 thread 上点 🚫；原因取其以 🚫 开头的最新回复。',
+        '- 确认可修：按所属扫描批次统计，方案后续被驳回仍计入；范围外批次不回溯计入。',
+        '- 已上线：关联 PR 全部为 merged；部分合并、待审或关闭未合并不算已上线。',
+        '- 不上线：尚未全部合并且审查人在 Bug 交付 thread 上点 🚫；原因取其以 🚫 开头的最新回复。',
         f'- 已回告：台账有发送记录；用户回应：Intercom 须 CS 回复确实告知客户已修复上线后，客户再有消息才算。'
         f'Canny 由看板 Agent 按语义判断回告后的新评论是否为客户回应，票数变化只作参考。从回告起跟踪 {FOLLOW_UP_DAYS} 天；Facebook 不跟踪回应。']
     return '\n'.join(lines) + '\n'
 
 
 # Slack 版按状态分组；已上线、不上线会持续累积，只列前几个编号。
-STATUS_ORDER = ('released', 'merged', 'review', 'pr_closed', 'fixing', 'rejected')
+STATUS_ORDER = ('released', 'review', 'pr_closed', 'fixing', 'rejected')
 STATUS_LIST_LIMIT = {'released': 5, 'rejected': 5}
 
 
 def status_lines(board, now):
     items = attention(board, now)
-    ages = {bug['identifier']: age for key in ('merged', 'review') for bug, age in items[key] if age}
+    ages = {bug['identifier']: age for bug, age in items['review'] if age}
     lines = []
     for state in STATUS_ORDER:
         bugs = [bug for bug in board['bugs'] if bug['state'] == state]
@@ -426,13 +395,12 @@ def render_slack(board, now, board_link=None):
     def intake(row):
         suspected = _suspected(row)
         gap = '' if suspected.startswith('约') else ' '
-        return f"采集 {_num(row['collected'])} 条 · 疑似{gap}{suspected} 条 · 确认 Bug {row['confirmed']} 个"
+        return f"采集 {_num(row['collected'])} 条 · 疑似{gap}{suspected} 条 · 确认可修 {row['confirmed']} 个"
     last = board['rows'][-1] if board['rows'] else None
     lines = [f"**📊 每日 Bug 值守看板｜截至 {board['through'][5:]}**", '']
     if last:
-        lines += [f"**昨日反馈（{last['date'][5:]}）**：" + (intake(last) if last['scanned'] else '未扫描'), '']
-    trial = board['trial']['confirmed'] if board['trial'] else 0
-    lines.append(f"**Bug 现状**（共 {len(board['bugs'])} 个" + (f"，含试运行 {trial} 个）" if trial else '）'))
+        lines += [f"**{last['label']}**：" + (intake(last) if last['scanned'] else '未扫描'), '']
+    lines.append(f"**Bug 现状**（范围内共 {len(board['bugs'])} 个）")
     lines += status_lines(board, now) or ['- 暂无']
     items = attention(board, now)
     for key in ('notify', 'responded'):
@@ -478,47 +446,32 @@ def _meta(issue, key):
 
 
 class GitHub:
-    def __init__(self):
-        self.prod_repos, self.runs = {}, {}
-
     def api(self, path):
         return run_json(['gh', 'api', path])
-
-    def deployable(self, repo):
-        if repo not in self.prod_repos:
-            workflows = self.api(f'repos/{repo}/actions/workflows?per_page=100')['workflows']
-            self.prod_repos[repo] = any(item['name'] == PROD_WORKFLOW for item in workflows)
-        return self.prod_repos[repo]
-
-    def contains(self, repo, number):
-        def check(base, head):
-            return compare_contains(self.api(f'repos/{repo}/compare/{base}...{head}'), number)
-        return check
-
-    def release_runs(self, repo, since):
-        key = (repo, since)
-        if key not in self.runs:
-            runs, page = [], 1
-            while True:
-                data = self.api(f'repos/{repo}/actions/runs?event=push&status=success&per_page=100'
-                                f'&page={page}&created=%3E%3D{since}')
-                runs += [run for run in data['workflow_runs'] if run['name'] == PROD_WORKFLOW]
-                if len(data['workflow_runs']) < 100:
-                    break
-                page += 1
-            self.runs[key] = runs
-        return self.runs[key]
 
     def pr(self, url):
         repo, number = PR_URL.match(url).groups()
         data = self.api(f'repos/{repo}/pulls/{number}')
-        state = 'merged' if data.get('merged_at') else data['state']
-        pr = {'url': url, 'repo': repo, 'number': int(number), 'state': state, 'createdAt': data['created_at'],
-              'mergedAt': data.get('merged_at'), 'deployable': self.deployable(repo), 'release': None}
-        if state == 'merged' and pr['deployable']:
-            runs = self.release_runs(repo, data['merged_at'])
-            pr['release'] = find_release(data['merge_commit_sha'], runs, self.contains(repo, number))
-        return pr
+        return {'url': url, 'repo': repo, 'number': int(number),
+                'state': 'merged' if data.get('merged_at') else data['state'],
+                'createdAt': data['created_at'], 'mergedAt': data.get('merged_at')}
+
+
+def scan_date(issue):
+    """扫描批次创建时间按北京时间取日期，不使用 Bug 创建或客户原反馈时间。"""
+    return dt.datetime.fromisoformat(issue['created_at'].replace('Z', '+00:00')).astimezone(TZ).date().isoformat()
+
+
+def bug_cohort(issue, issues_by_id, ledger):
+    meta = _meta(issue, 'dailyBug') or {}
+    batch = issues_by_id.get(meta.get('batchId') or issue.get('parent_issue_id'))
+    if not batch:
+        return None
+    scan = _meta(batch, 'dailyScan') or {}
+    record = ledger.get((batch['identifier'], 'scan')) or {}
+    feedback = scan.get('targetDate') or record.get('feedbackDate')
+    # 历史非扫描批次可识别为范围外，不猜它属于哪一个反馈日。
+    return {'scanDate': scan_date(batch), 'feedbackDate': feedback, 'batch': batch['identifier']}
 
 
 def slack_thread(cli, permalink):
@@ -571,20 +524,34 @@ def collect(args, now):
     start = dt.date.fromisoformat(args.start)
     ledger, warnings = ledger_entries(run_json(['multica', 'issue', 'comment', 'list', args.ledger_issue,
                                                 '--full', '--compact', '--output', 'json']))
-    for issue in load_issues(args.project):
+    issues = load_issues(args.project)
+    issues_by_id = {issue['id']: issue for issue in issues}
+    through = (dt.date.fromisoformat(args.today) if args.today else now.astimezone(TZ).date()) - dt.timedelta(days=1)
+    for issue in issues:
         is_bug = (_meta(issue, 'dailyBug') or {}).get('mode') == 'bug'
-        is_scan = bool(_meta(issue, 'dailyScan')) and issue['created_at'][:10] >= start.isoformat()
+        is_scan = bool(_meta(issue, 'dailyScan')) and scan_date(issue) >= start.isoformat()
         if not (is_bug or is_scan):
             continue
+        cohort = bug_cohort(issue, issues_by_id, ledger) if is_bug else None
+        if is_bug:
+            if cohort and cohort['scanDate'] < start.isoformat():
+                continue
+            if not cohort or not cohort['feedbackDate']:
+                warnings.append(f"{issue['identifier']} 缺少所属扫描批次或批次反馈日，未计入看板")
+                continue
+            if not start.isoformat() <= cohort['feedbackDate'] <= through.isoformat():
+                continue
         board = ledger.get((issue['identifier'], 'bug' if is_bug else 'scan'))
         if board is None:
             warnings.append(f"{issue['identifier']} 在字段台账中没有记录，未计入看板")
             continue
         if not is_bug:
-            scans.append({**board, 'identifier': issue['identifier'], 'createdAt': issue['created_at']})
+            scans.append({**board, 'identifier': issue['identifier'],
+                          'createdAt': issue['created_at'], 'scanDate': scan_date(issue)})
             continue
         bug = {'identifier': issue['identifier'], 'url': args.issue_url_base + issue['identifier'],
-               'summary': issue['title'].split('｜')[-1], 'feedbackDate': board['feedbackDate'],
+               'summary': issue['title'].split('｜')[-1], 'feedbackDate': cohort['feedbackDate'], 'scanDate': cohort['scanDate'],
+               'batch': cohort['batch'], 'sourceFeedbackDate': board.get('feedbackDate'),
                'source': board.get('source'), 'sourceUrl': board.get('sourceUrl'),
                'deliveryPermalink': (board.get('delivery') or {}).get('permalink'), 'rejection': None, 'notify': None}
         bug['prs'] = [github.pr(url) for url in board.get('prs') or []]
@@ -729,7 +696,7 @@ RECORD_GROUPS = (('需要关注', ('verification_blocked', 'confirmed', 'duplica
                  ('已处理', ('cs_followed', 'excluded_after_investigation')),
                  ('非 Bug', ('product_decision', 'non_bug')))
 DEFAULT_RECORD_STATE = 'verification_blocked'
-TODO_TAGS = {'notify': 'notify', 'responded': 'released', 'merged': 'review', 'review': 'review',
+TODO_TAGS = {'notify': 'notify', 'responded': 'released', 'review': 'review',
              'pr_closed': 'rejected', 'fixing': 'review', 'unrejectable': 'review'}
 
 
@@ -744,13 +711,12 @@ def _bug_note(bug, now, ages):
 def html_payload(board, now, scan, scan_note, board_link=None, issue_url_base=''):
     """HTML 版所需数据：与 Markdown/Slack 版同源，只做展示所需的整理。"""
     items = attention(board, now)
-    ages = {bug['identifier']: note for key in ('review', 'merged') for bug, note in items[key] if note}
+    ages = {bug['identifier']: note for bug, note in items['review'] if note}
     bugs = [{
         'identifier': bug['identifier'], 'url': _https(bug['url']), 'summary': bug['summary'],
-        'feedbackDate': bug['feedbackDate'], 'trial': bug['feedbackDate'] < board['start'],
+        'feedbackDate': bug['feedbackDate'], 'scanDate': bug.get('scanDate'),
         'source': bug.get('source') or '', 'sourceUrl': _https(bug.get('sourceUrl')), 'state': bug['state'],
         'prs': [{'label': f"{pr['repo'].split('/')[-1]}#{pr['number']}", 'url': _https(pr['url'])} for pr in bug['prs']],
-        'releases': sorted({pr['release']['tag'] for pr in bug['prs'] if pr.get('release')}),
         'note': _bug_note(bug, now, ages),
     } for bug in board['bugs']]
     todo = [{'key': key, 'title': ATTENTION_TITLES[key], 'identifier': bug['identifier'], 'url': _https(bug['url']),
@@ -819,11 +785,11 @@ def _html_funnel(payload):
     split = ' · '.join(f'{_h(name.capitalize())} {count}' for name, count in
                        sorted(sources.items(), key=lambda item: -item[1]))
     stages = [('s1', '采集', _num(latest['collected']), split), ('s2', '疑似候选', _suspected(latest), '需要调查'),
-              ('s3', '确认可修', latest['confirmed'], '进入修复'), ('s4', '已上线', latest['released'], '本日反馈')]
+              ('s3', '确认可修', latest['confirmed'], '进入修复'), ('s4', '已上线', latest['released'], '本批次 PR 已合并')]
     flow = ''.join(f'<div class="stage {cls}"><b>{label}</b><strong>{_h(value)}</strong><small>{note}</small></div>'
                    for cls, label, value, note in stages)
     coverage = '三源采集完整' if latest.get('coverageComplete') else '来源覆盖不完整'
-    source = f"扫描任务 {_a(scan['identifier'], scan['url'])} · " if scan else ''
+    source = (_h(latest['label']) + ' · ' + (f"扫描任务 {_a(scan['identifier'], scan['url'])} · " if scan else ''))
     counts = _record_counts(payload)
     foot = ''.join(f'<span>{_h(RECORD_STATES.get(state, state))} <b>{counts[state]}</b></span>'
                    for state in RECORD_STATES if state != 'confirmed' and counts.get(state))
@@ -849,15 +815,14 @@ def _html_bugs(payload):
             continue
         rows = []
         for bug in bugs:
-            origin = ' · '.join(filter(None, [bug['source'], bug['feedbackDate'][5:], '试运行' if bug['trial'] else '']))
-            prs = ' · '.join([_a(pr['label'], pr['url']) for pr in bug['prs']] + [_h(tag) for tag in bug['releases']]) or '–'
+            origin = ' · '.join(filter(None, [bug['source'], f"{bug['scanDate'][5:]} 扫描" if bug['scanDate'] else '', f"{bug['feedbackDate'][5:]} 反馈"]))
+            prs = ' · '.join([_a(pr['label'], pr['url']) for pr in bug['prs']]) or '–'
             tag_kind = {'released': 'released', 'rejected': 'rejected'}.get(state)
             note = _tag(tag_kind, bug['note']) if tag_kind and bug['note'] else _h(bug['note'])
             rows.append(f'<div class="bug">{_a(bug["identifier"], bug["url"])}<div>{_h(bug["summary"])}'
                         f'<span class="src">{_h(origin)}</span></div><div class="prs">{prs}</div><div class="note">{note}</div></div>')
         lanes.append(f'<h3>{_h(STATE_LABELS[state].split(" ", 1)[-1])} {len(bugs)}</h3>' + ''.join(rows))
-    trial = sum(1 for bug in payload['bugs'] if bug['trial'])
-    sub = f"共 {len(payload['bugs'])} 个" + (f'，含试运行 {trial} 个' if trial else '')
+    sub = f"范围内共 {len(payload['bugs'])} 个"
     body = f'<div class="lane">{"".join(lanes)}</div>' if lanes else '<p class="empty">暂无确认的 Bug。</p>'
     return f'<section class="widget full"><div class="head"><h2>Bug 进度</h2><p>{sub}</p></div>{body}</section>'
 
@@ -878,8 +843,8 @@ def _html_trend(payload):
         return ''.join(f'<td>{cell if index == 2 else _h(cell)}</td>' for index, cell in enumerate(cells))
     body = ''.join(f'<tr>{line(row, row["label"])}</tr>' for row in rows)
     body += f'<tr class="total">{line(total, total["label"], chart=False)}</tr>'
-    head = ''.join(f'<th>{text}</th>' for text in ('反馈日', '采集', '采集 / 疑似', '疑似', '确认', '不上线', '已上线', '已回告'))
-    return (f'<section class="widget full"><div class="head"><h2>每日趋势</h2><p>按反馈日；试运行 Bug 只计入累计</p></div>'
+    head = ''.join(f'<th>{text}</th>' for text in ('扫描日（反馈日）', '采集', '采集 / 疑似', '疑似', '确认可修', '不上线', '已上线', '已回告'))
+    return (f'<section class="widget full"><div class="head"><h2>每日趋势</h2><p>按所属扫描批次；范围外 Bug 不计入</p></div>'
             f'<div class="scroll"><table class="days"><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div></section>')
 
 
@@ -934,8 +899,8 @@ def _html_view(payload):
     """单个反馈日的完整视图；所有动态文本仍经静态渲染转义。"""
     return (_html_top(payload) + '<main><div class="wrap"><div class="grid">' + _html_funnel(payload)
             + _html_todo(payload) + '</div>' + _html_bugs(payload) + _html_trend(payload) + _html_records(payload)
-            + '<footer>已上线：PR 合并提交包含在「Release to PRODUCTION」成功运行的 release 标签中；无该流程的仓库合并即视为就绪。'
-            '不上线：审查人在交付 thread 上点 🚫。</footer></div></main>')
+            + '<footer>已上线：关联 PR 全部 merged；确认可修按所属扫描批次统计，后续方案驳回仍计入。'
+            '不上线：尚未全部合并且审查人在交付 thread 上点 🚫。</footer></div></main>')
 
 
 def render_html(payload, date_payloads=None):
@@ -944,7 +909,7 @@ def render_html(payload, date_payloads=None):
     views = {item['through']: item for item in date_payloads or []}
     views[payload['through']] = payload
     options = ''.join(f'<option value="{_h(date)}"' + (' selected' if date == payload['through'] else '')
-                      + f'>{_h(date)}</option>' for date in sorted(views, reverse=True))
+                      + f'>{_h((views[date]['rows'] or [{'label': date}])[-1]['label'])}</option>' for date in sorted(views, reverse=True))
     picker = ('<div class="wrap date-tools js-only"><label for="feedback-date">反馈日期</label>'
               f'<select id="feedback-date">{options}</select>'
               '<span>累计截至所选反馈日；Bug 进度为生成时的最新状态。</span></div>')

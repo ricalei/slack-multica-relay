@@ -82,13 +82,15 @@ Cloudflare 使用 `pnpm dev:cf`、`pnpm build:cf` 和 `pnpm deploy:cf`，共享�
 
 ## 每日值守看板
 
-`scripts/duty-board.py` 只读汇总「GRM 每日 Bug 值守」的反馈日漏斗：读取值守项目任务、字段台账任务 GRM-664 的 `<!-- duty-board:v1 -->` 评论、GitHub PR 与「Release to PRODUCTION」运行（兼容 cherry-pick 发布线）、Slack 交付 thread 上审查人的 🚫，以及下节的回告记录与回应跟踪，输出 `board.json`、`board.md`、`slack.md`，以及可直接打开、支持切换反馈日期的 `board.html`。「GRM 每日值守看板」Agent（Prompt 真源 [DUTY-BOARD-PROMPT.md](DUTY-BOARD-PROMPT.md)）由 Autopilot 每天 10:00 运行 `origin/main` 版本，发送到指定交付频道、在该消息 thread 上传 `board.html`，并追加到 GRM-665。本地预览：
+`scripts/duty-board.py` 只读汇总「GRM 每日 Bug 值守」的扫描批次漏斗：读取值守项目任务、字段台账任务 GRM-664 的 `<!-- duty-board:v1 -->` 评论、GitHub PR 的合并状态、Slack 交付 thread 上审查人的 🚫，以及下节的回告记录与回应跟踪，输出 `board.json`、`board.md`、`slack.md`，以及可直接打开、支持切换反馈日期的 `board.html`。「GRM 每日值守看板」Agent（Prompt 真源 [DUTY-BOARD-PROMPT.md](DUTY-BOARD-PROMPT.md)）由 Autopilot 每天 10:00 运行 `origin/main` 版本，发送到指定交付频道、在该消息 thread 上传 `board.html`，并追加到 GRM-665。本地预览：
 
 ```bash
 python3 scripts/duty-board.py --project <值守项目 ID> --ledger-issue GRM-664 --start 2026-10-12 --reviewer <审查人 Slack 用户 ID> --canny-account-ref <Canny 内部测试账号 aid> --output-dir <输出目录>
 ```
 
-HTML 默认展示昨天的反馈日，可在顶部切换 d1 起的任意反馈日（例如 `2026-10-13`）。切换后同步更新当日漏斗、截至所选反馈日的累计与 Bug 范围、每日趋势和该日逐条记录；历史扫描证据会内置在同一份 HTML 中，离线打开也可切换。Bug 的修复、上线与回告进度采用生成时的最新状态，不表示历史时点快照。未扫描或证据索引不可用的日期会显示具体原因（下载失败时含命令退出码与 stderr 摘要，默认日期的原因同时输出在 stdout 的 `scanNote`）。默认日期的索引可用 `--scan-index <scan-evidence-index.json 或证据 zip>` 传入已下载的文件，看板 Agent 即按此方式先自行下载再交给脚本；其它日期仍由脚本从扫描任务附件下载。Markdown、Slack 与 JSON 仍只输出默认日期。
+HTML 默认展示昨天的反馈日，可在顶部切换 d1 起的任意反馈日（例如 `2026-10-13`）。选择项与趋势行同时标出扫描日和反馈日（如 10-13 扫描、10-12 反馈）。切换后同步更新该扫描批次的漏斗、截至所选反馈日的累计与 Bug 范围、每日趋势和该日逐条记录；历史扫描证据会内置在同一份 HTML 中，离线打开也可切换。Bug 的修复、上线与回告进度采用生成时的最新状态，不表示历史时点快照。未扫描或证据索引不可用的日期会显示具体原因（下载失败时含命令退出码与 stderr 摘要，默认日期的原因同时输出在 stdout 的 `scanNote`）。默认日期的索引可用 `--scan-index <scan-evidence-index.json 或证据 zip>` 传入已下载的文件，看板 Agent 即按此方式先自行下载再交给脚本；其它日期仍由脚本从扫描任务附件下载。Markdown、Slack 与 JSON 仍只输出默认日期。
+
+确认可修按 Bug 的 `dailyBug.batchId`（或父任务）所属扫描批次归组，使用批次反馈日，保留原反馈日作为追溯字段；不使用客户原帖时间或 Bug 创建时间归组。范围外批次不计入明细、累计或回告跟踪，缺少批次关联时告警并排除，不再回溯补入“试运行”。确认可修的数量包含后续被驳回的方案；已交付 PR 也保留这些方案的 PR。关联 PR 全部 merged 才计入“已上线”，部分 merged、open、closed 未合并均不算；已全部 merged 时历史 🚫 不覆盖合并结果。
 
 ## 上线回告
 
