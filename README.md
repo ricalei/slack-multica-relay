@@ -88,7 +88,7 @@ Cloudflare 使用 `pnpm dev:cf`、`pnpm build:cf` 和 `pnpm deploy:cf`，共享�
 python3 scripts/duty-board.py --project <值守项目 ID> --ledger-issue GRM-664 --start 2026-10-12 --reviewer <审查人 Slack 用户 ID> --canny-account-ref <Canny 内部测试账号 aid> --output-dir <输出目录>
 ```
 
-HTML 默认展示昨天的反馈日，可在顶部切换 d1 起的任意反馈日（例如 `2026-10-13`）。切换后同步更新当日漏斗、截至所选反馈日的累计与 Bug 范围、每日趋势和该日逐条记录；历史扫描证据会内置在同一份 HTML 中，离线打开也可切换。Bug 的修复、上线与回告进度采用生成时的最新状态，不表示历史时点快照。未扫描或证据索引不可用的日期会显示具体原因；Markdown、Slack 与 JSON 仍只输出默认日期。
+HTML 默认展示昨天的反馈日，可在顶部切换 d1 起的任意反馈日（例如 `2026-10-13`）。切换后同步更新当日漏斗、截至所选反馈日的累计与 Bug 范围、每日趋势和该日逐条记录；历史扫描证据会内置在同一份 HTML 中，离线打开也可切换。Bug 的修复、上线与回告进度采用生成时的最新状态，不表示历史时点快照。未扫描或证据索引不可用的日期会显示具体原因（下载失败时含命令退出码与 stderr 摘要，默认日期的原因同时输出在 stdout 的 `scanNote`）。默认日期的索引可用 `--scan-index <scan-evidence-index.json 或证据 zip>` 传入已下载的文件，看板 Agent 即按此方式先自行下载再交给脚本；其它日期仍由脚本从扫描任务附件下载。Markdown、Slack 与 JSON 仍只输出默认日期。
 
 ## 上线回告
 
