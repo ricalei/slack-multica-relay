@@ -387,6 +387,37 @@ class HtmlTests(unittest.TestCase):
         self.assertIn('S-13 没有可用的证据索引', early['scanNote'])
         self.assertEqual(latest['scan']['identifier'], 'S-14')
 
+    def test_provided_scan_index_only_serves_latest_date_and_must_match_scan(self):
+        import json, tempfile
+        scans = [{'identifier': 'S-13', 'feedbackDate': '2026-10-13', 'createdAt': 'a'},
+                 {'identifier': 'S-14', 'feedbackDate': '2026-10-14', 'createdAt': 'b'}]
+        board = board_module.build_board(scans, [], dt.date(2026, 10, 13), dt.date(2026, 10, 15))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'scan-evidence-index.json'
+            path.write_text(json.dumps({'identifier': 'S-14', 'targetDate': '2026-10-14',
+                                        'records': [{'state': 'non_bug', 'summary': 'provided'}]}))
+            with patch.object(board_module, 'load_scan_index',
+                              return_value={'targetDate': '2026-10-13', 'records': []}) as load:
+                early, latest = board_module.html_date_payloads(board, scans, NOW, scan_index_path=str(path))
+            self.assertEqual([call.args[0] for call in load.call_args_list], ['S-13'])
+            self.assertEqual(early['scan']['identifier'], 'S-13')
+            self.assertEqual(latest['scan']['records'][0]['summary'], 'provided')
+            path.write_text(json.dumps({'identifier': 'S-OTHER', 'targetDate': '2026-10-14', 'records': []}))
+            scan, note = board_module.yesterday_scan(latest, scans, str(path))
+        self.assertIsNone(scan)
+        self.assertIn('索引属于 S-OTHER', note)
+
+    def test_download_failure_reason_is_kept_in_note(self):
+        import subprocess
+        scans = [{'identifier': 'S-14', 'feedbackDate': '2026-10-14', 'createdAt': 'a'}]
+        board = board_module.build_board(scans, [], dt.date(2026, 10, 13), dt.date(2026, 10, 15))
+        error = subprocess.CalledProcessError(1, ['multica', 'attachment', 'download', 'A1', '-o', '/tmp/x'],
+                                              stderr='Error: get attachment:\n 403 forbidden\n')
+        with patch.object(board_module, 'load_scan_index', side_effect=error):
+            scan, note = board_module.yesterday_scan(board, scans)
+        self.assertIsNone(scan)
+        self.assertIn('multica attachment download 退出码 1：Error: get attachment: 403 forbidden', note)
+
     def test_html_embeds_dates_and_preserves_static_default(self):
         board = board_module.build_board([], [], dt.date(2026, 10, 12), dt.date(2026, 10, 15))
         payloads = board_module.html_date_payloads(board, [], NOW)

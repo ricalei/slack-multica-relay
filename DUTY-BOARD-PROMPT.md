@@ -15,13 +15,15 @@
 
 1. 计算本次运行的 Asia/Shanghai 日期 today，看板统计截至 today 前一天的反馈日。在 Runtime 临时目录建立本次工作目录，不写入仓库。
 2. 获取脚本：对 `/Users/moego-winches/Desktop/Company/person/slack-multica-relay` 执行 `git fetch origin main`，再用 `git show origin/main:scripts/duty-board.py` 导出到工作目录后运行。只用 `origin/main` 版本，不用该仓库当前分支、工作区或未提交内容，也不切换其分支。获取失败时报告原因并结束，不改用其它版本。
-3. 运行脚本：
+3. 取截至日的扫描证据索引：用 `multica issue search '每日 Bug 值守｜<截至日 MM-DD> 反馈' --include-closed --output json` 找到值守项目内该反馈日最新创建的扫描任务，核对标题与项目；读取其评论，从最新一条带附件的评论中用 `multica attachment download <附件 ID> -o <工作目录>/scan-index` 下载 `scan-evidence-index.json`，没有该文件时改下载同一评论中的证据 zip。下载成功时运行脚本加 `--scan-index <下载得到的文件>`；找不到任务或附件、下载失败时不加该参数，记下命令、退出码与 stderr 摘要，继续后续步骤。
+4. 运行脚本：
 
    ```bash
    python3 <工作目录>/duty-board.py --project 724dce94-a8b9-44e7-8390-9c3cbdac7bc0 \
      --ledger-issue GRM-664 --start 2026-10-12 --reviewer <审查人 Slack 用户 ID> \
      --canny-account-ref aid:13156918 \
-     --board-link https://multica.devops.moego.dev/grm/issues/GRM-665 --output-dir <工作目录>/out
+     --board-link https://multica.devops.moego.dev/grm/issues/GRM-665 --output-dir <工作目录>/out \
+     [--scan-index <工作目录>/scan-index/<文件名>]
    ```
 
    脚本需要的 Multica、GitHub（`gh`）、Slack、Intercom Skill 与 moe-feedback-collector 读取能力沿用 Runtime 已有身份；已回告的 Canny 帖子经 collector `canny-post` 只读读取，需要时由其按既有方式以内部测试账号 `aid:13156918` 续登，不发表评论或投票。脚本失败时记录命令与 stderr 摘要后结束，不手工统计或拼凑数字。
@@ -32,11 +34,11 @@
      - 没有符合的内容时，以上字段保持原值。
    - `record` 每项是脚本已确认的跟踪记录（Intercom 客户回应，或 Canny 首次跟踪的票数基准），原样写入。
    - 把本轮全部新记录作为一个 JSON 数组，以首行 `<!-- duty-board:v1 -->`、一句说明和 ```json 代码块追加到 GRM-664，用 `--content-file` 传入并回读解析。说明与评论中不引用会话原文、客户或客服姓名。随后用同一命令重跑脚本；重跑后仍有 `record` 时按同样方式再写一次并重跑，最多重跑 2 次，仍有待处理项时在最终答复说明。后续步骤只使用最后一次运行的输出。
-4. 核对输出：读取 `out/board.json`、`out/board.md`、`out/slack.md`，并确认 `out/board.html` 已生成，标题中的截至日期等于 today 前一天，各份输出数字一致。脚本给出的数字、状态与 warnings 原样发布，不改写、不补充推测；warnings 已在看板「数据说明」和 Slack「需要关注」中。
-5. 去重：读取 GRM-665 评论，以及 Slack 频道最近一天由当前 Bot 发送的消息。已有相同「截至 YYYY-MM-DD 反馈日」标题的看板时视为本日已发布，不重复发送或评论，直接答复已有链接并结束；只缺其中一处时只补缺失的那一处；看板消息已存在但其 thread 中没有当日 `board.html` 时只补传附件。
-6. 发送 Slack：按 Slack Skill 使用 `send --channel <交付频道 ID> --text-file <工作目录>/out/slack.md --as bot`，先 `--dry-run` 核对 mention 清单为空，再用返回的 `preview_digest` 以 `--confirm-preview` 发送；用 `get` 回读消息并记录 permalink 与消息 ts。发送失败不换身份或改格式重试，在评论中写明未发送及原因。
+5. 核对输出：读取 `out/board.json`、`out/board.md`、`out/slack.md`，并确认 `out/board.html` 已生成，标题中的截至日期等于 today 前一天，各份输出数字一致。脚本给出的数字、状态与 warnings 原样发布，不改写、不补充推测；warnings 已在看板「数据说明」和 Slack「需要关注」中。脚本 stdout 的 `scanNote` 非空时表示 HTML 缺少截至日逐条记录，原样记下其中原因。
+6. 去重：读取 GRM-665 评论，以及 Slack 频道最近一天由当前 Bot 发送的消息。已有相同「截至 YYYY-MM-DD 反馈日」标题的看板时视为本日已发布，不重复发送或评论，直接答复已有链接并结束；只缺其中一处时只补缺失的那一处；看板消息已存在但其 thread 中没有当日 `board.html` 时只补传附件。
+7. 发送 Slack：按 Slack Skill 使用 `send --channel <交付频道 ID> --text-file <工作目录>/out/slack.md --as bot`，先 `--dry-run` 核对 mention 清单为空，再用返回的 `preview_digest` 以 `--confirm-preview` 发送；用 `get` 回读消息并记录 permalink 与消息 ts。发送失败不换身份或改格式重试，在评论中写明未发送及原因。
    消息发送成功后上传 HTML 看板：`files_upload --channel <交付频道 ID> --thread-ts <看板消息 ts> --file <工作目录>/out/board.html --filename duty-board-<截至日期>.html --message '完整看板（HTML，可直接打开）' --as bot`，再用 `replies` 回读确认附件在该 thread。上传失败或结果不明时先回读，确认未上传才重试一次；仍失败时在评论中写明原因，不改用其它频道或身份。消息未发送时不上传。
-7. 在 GRM-665 追加顶层评论：内容为 `out/board.md` 全文，末尾附一行「Slack：<permalink>」或未发送原因；HTML 看板未上传时再附一行原因。多行内容用 `--content-file` 传入，写后回读。
-8. 最终答复只写一句结论、Slack 与 GRM-665 评论链接、HTML 是否已上传，以及 warnings 条数；不复述整份看板。
+8. 在 GRM-665 追加顶层评论：内容为 `out/board.md` 全文，末尾附一行「Slack：<permalink>」或未发送原因；HTML 看板未上传时再附一行原因；`scanNote` 非空或第 3 步下载失败时再附一行「HTML 逐条记录：<scanNote 或下载命令、退出码与 stderr 摘要>」。多行内容用 `--content-file` 传入，写后回读。
+9. 最终答复只写一句结论、Slack 与 GRM-665 评论链接、HTML 是否已上传及是否含截至日逐条记录（不含时附原因），以及 warnings 条数；不复述整份看板。
 
 不保存凭据、原始 Slack 消息或完整 API 响应；工作目录中的临时文件在运行结束后可删除。

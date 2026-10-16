@@ -667,7 +667,7 @@ def scan_records(index):
 
 
 def read_scan_index(path):
-    if path.name == SCAN_INDEX_NAME:
+    if path.suffix != '.zip':
         return json.loads(path.read_text())
     with zipfile.ZipFile(path) as archive:
         # 只读取同名索引，不解压其它文件；超限的成员视为不可用。
@@ -695,18 +695,33 @@ def load_scan_index(identifier):
     return None
 
 
-def yesterday_scan(board, scans):
-    """昨日反馈日最新一次扫描的逐条记录；没有扫描或索引不可用时返回原因供页面说明。"""
+def _index_error(error):
+    """读取失败原因摘要：命令失败取退出码与 stderr 末段，其它异常取类型与说明。"""
+    if isinstance(error, subprocess.CalledProcessError):
+        detail = ' '.join((error.stderr or '').split())[-200:]
+        return f"{' '.join(error.cmd[:3])} 退出码 {error.returncode}" + (f"：{detail}" if detail else '')
+    return f"{type(error).__name__}：{' '.join(str(error).split())[:200]}"
+
+
+def yesterday_scan(board, scans, scan_index_path=None):
+    """昨日反馈日最新一次扫描的逐条记录；没有扫描或索引不可用时返回原因供页面说明。
+
+    scan_index_path 是值守 Agent 预先下载的截至日索引，只用于截至日视图；其它日期仍由脚本自行下载。"""
     candidates = [scan for scan in scans if scan.get('feedbackDate') == board['through']]
     if not candidates:
         return None, f"{board['through']} 反馈日尚未扫描，暂无逐条记录。"
     scan = max(candidates, key=lambda item: item['createdAt'])
+    unavailable = f"{scan['identifier']} 没有可用的证据索引（{SCAN_INDEX_NAME}），暂无逐条记录"
     try:
-        index = load_scan_index(scan['identifier'])
-    except (subprocess.CalledProcessError, OSError, ValueError, zipfile.BadZipFile):
-        index = None
-    if not index or index.get('targetDate') not in (None, board['through']):
-        return None, f"{scan['identifier']} 没有可用的证据索引（{SCAN_INDEX_NAME}），暂无逐条记录。"
+        index = read_scan_index(Path(scan_index_path)) if scan_index_path else load_scan_index(scan['identifier'])
+    except (subprocess.CalledProcessError, OSError, ValueError, zipfile.BadZipFile) as error:
+        return None, f"{unavailable}；读取失败：{_index_error(error)}。"
+    if not index:
+        return None, f"{unavailable}。"
+    if index.get('targetDate') not in (None, board['through']):
+        return None, f"{unavailable}；索引反馈日为 {index.get('targetDate')}。"
+    if index.get('identifier') not in (None, scan['identifier']):
+        return None, f"{unavailable}；索引属于 {index.get('identifier')}。"
     return {'identifier': scan['identifier'], 'records': scan_records(index)}, None
 
 
@@ -748,7 +763,7 @@ def html_payload(board, now, scan, scan_note, board_link=None, issue_url_base=''
     }
 
 
-def html_date_payloads(board, scans, now, board_link=None, issue_url_base=''):
+def html_date_payloads(board, scans, now, board_link=None, issue_url_base='', scan_index_path=None):
     """按反馈日内置视图；历史日期限制反馈范围，进度仍采用生成时的最新状态。"""
     payloads = []
     for date in [row['date'] for row in board['rows']] or [board['through']]:
@@ -760,7 +775,7 @@ def html_date_payloads(board, scans, now, board_link=None, issue_url_base=''):
                                dt.date.fromisoformat(date) + dt.timedelta(days=1))
             # 全局读取告警也必须可见，不因切换日期隐藏数据问题。
             view['warnings'] = board['warnings']
-        scan, note = yesterday_scan(view, scans)
+        scan, note = yesterday_scan(view, scans, scan_index_path if date == board['through'] else None)
         payloads.append(html_payload(view, now, scan, note, board_link, issue_url_base))
     return payloads
 
@@ -1103,6 +1118,8 @@ def main(argv=None):
     parser.add_argument('--issue-url-base', default='https://multica.devops.moego.dev/grm/issues/')
     parser.add_argument('--board-link', help='常驻看板任务链接，附在 Slack 版末尾')
     parser.add_argument('--output-dir', required=True)
+    parser.add_argument('--scan-index', help='截至日扫描任务的证据索引（scan-evidence-index.json 或含它的证据 zip）；'
+                                             '不传时脚本自行从扫描任务附件下载')
     args = parser.parse_args(argv)
     now = dt.datetime.now(dt.timezone.utc)
     today = dt.date.fromisoformat(args.today) if args.today else now.astimezone(TZ).date()
@@ -1116,9 +1133,9 @@ def main(argv=None):
     (output / 'board.json').write_text(json.dumps(board, ensure_ascii=False, indent=2))
     (output / 'board.md').write_text(render_markdown(board, now))
     (output / 'slack.md').write_text(render_slack(board, now, args.board_link))
-    date_payloads = html_date_payloads(board, scans, now, args.board_link, args.issue_url_base)
+    date_payloads = html_date_payloads(board, scans, now, args.board_link, args.issue_url_base, args.scan_index)
     (output / 'board.html').write_text(render_html(date_payloads[-1], date_payloads))
-    print(json.dumps({'output': str(output), 'warnings': board['warnings'],
+    print(json.dumps({'output': str(output), 'warnings': board['warnings'], 'scanNote': date_payloads[-1]['scanNote'],
                       'followUpTasks': {key: len(value) for key, value in tasks.items()}}, ensure_ascii=False))
 
 
