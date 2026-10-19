@@ -154,9 +154,11 @@ Winches（核对作者为审查人 Multica 用户）在已交付 Bug 任务中�
 | 首行 | 动作 |
 |---|---|
 | `回告` | 起草，第二行起是起草要求（如指定 CS、调整语气） |
-| `确认发布` | 仅 Intercom：以 Winches 的 Slack 身份把已审核草稿私信给 CS；第二行可附私信链接 |
-| `已回告` | Winches 已自行发送（Canny、Facebook，或自行私信的 Intercom），只记录台账 |
-| `不回告` | 本 Bug 不回告，其后内容为原因，只记录台账 |
+| `确认发布` | 仅 Intercom：以 Winches 的 Slack 身份把已审核草稿与英文报告私信给 CS 并回读，再记录 `sent` 台账并回读，按下方「Slack 标注」在交付根消息添加 📤 并回读；第二行可附私信链接 |
+| `已回告` | Winches 已自行发送（Canny、Facebook，或自行私信的 Intercom）：记录 `sent` 台账并回读，再按下方「Slack 标注」在交付根消息添加 📤 并回读 |
+| `不回告` | 本 Bug 不回告，其后内容为原因：记录 `skipped` 台账并回读，再按下方「Slack 标注」在交付根消息添加 🔕 并回读 |
+
+`确认发布`、`已回告`、`不回告` 的台账和 Slack 表情均回读成功后，才可在触发评论下回复处理完成；任一步失败须说明已完成的动作与具体缺口。
 
 除 `确认发布` 外不私信或 @ 任何人；任何指令都不编辑删除消息、不在 Intercom、Canny、Facebook 写入；reaction 只按下方「Slack 标注」添加。写入前先查台账与对应触发评论的既有回执，已完成的动作复用，不重复发送或记录。
 
@@ -192,7 +194,7 @@ Winches（核对作者为审查人 Multica 用户）在已交付 Bug 任务中�
 
 - `确认发布`：只发送触发评论之前最近一次 `回告` 回执中的草稿。从草稿消息读取 text 代码块中的私信正文与英文报告附件，原文发送，不改写。私信会话：第二行有私信链接时用其会话 ID；否则用 slack skill `search 'in:<@CS Slack 用户 ID>' --as user` 找到与该 CS 的已有私信会话（`D…`）。找不到时回复请 Winches 在 Slack 打开与该 CS 的私信并在 `确认发布` 第二行附链接，然后结束。以 `--as user` 先 `send --dry-run` 核对 mention 清单为空，再发送私信正文；再用 `files_upload --thread-ts <私信消息 ts> --file <英文报告> --as user` 附在该消息 thread；`get` 回读作者、正文与附件。身份不是 Winches 或发送结果不明时先回读，不换身份重试。非 Intercom 来源回复请 Winches 自行发送后评论 `已回告`。
 - 台账：`确认发布`、`已回告`、`不回告` 完成后在 GRM-664 追加 `{"issue":"<Bug 任务编号>","kind":"notify","source":"intercom|canny|facebook","state":"sent|skipped","at":"<发送时间；已回告、不回告取触发评论时间>","via":"slack_dm|manual|null","commentId":"<触发评论 ID>","message":"<私信消息链接或 null>","cs":{"intercomAdminId":"<客服 admin ID>","slackUserId":"<Slack 用户 ID>"},"reason":"<不回告原因或 null>"}`，非 Intercom 或未识别 CS 时 `cs` 为 null；写后回读。看板以每个 Bug 最新一条 notify 记录为准，`at` 是回应跟踪起点。
-- Slack 标注：台账回读后，以 Bot 身份在该 Bug 交付 thread 根消息加 reaction，`sent` 加 📤（`react --channel <交付频道 ID> --ts <交付根消息 ts> --emoji outbox_tray --as bot`），`skipped` 加 🔕（`--emoji no_bell`）；已有同一表情时不重复添加，不移除其它表情。标注只是 Slack 中的视觉提示，状态以台账为准；标注失败不回滚台账，在触发评论回复中说明。
+- Slack 标注：台账回读后，以 Bot 身份在该 Bug 交付 thread 根消息加 reaction，`sent` 加 📤（`react --channel <交付频道 ID> --ts <交付根消息 ts> --emoji outbox_tray --as bot`），`skipped` 加 🔕（`--emoji no_bell`）；已有同一表情时不重复添加，不移除其它表情。添加后或发现已有同一表情时，均回读交付根消息确认对应表情存在。标注只是 Slack 中的视觉提示，状态以台账为准；标注失败不回滚台账，在触发评论回复中说明。
 
 ## 隔离接续试跑
 
