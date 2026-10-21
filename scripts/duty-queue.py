@@ -2,6 +2,7 @@
 """只读生成每日值守的下一步计划；任务写入、交付验证和启动由值守 Agent 执行。"""
 import argparse
 import datetime as dt
+import hashlib
 import json
 import re
 import subprocess
@@ -14,6 +15,11 @@ STATES = TERMINAL | {'ready', 'investigating', 'confirmed', 'waiting_repair', 's
 FINISHED_BATCHES = {'completed', 'finished_with_skips'}
 STOPPED = {'cancelled', 'canceled', 'done'}
 IN_FLIGHT = {'queued', 'dispatched', 'running', 'waiting_local_directory'}
+PROTOCOL_VERSION = 2
+ROUND_POLICY = 'investigate_all_then_repair'
+ROUND_STATES = {'collecting', 'registering', 'investigating', 'ready_repair',
+                'preparing_repair', 'repairing', 'completed'}
+FIXABLE = {'confirmed', 'waiting_repair', 'delivered'}
 
 
 class QueueError(ValueError):
@@ -55,7 +61,8 @@ def valid_external_block(item):
     if not isinstance(attempts, dict):
         return False
     required = ('missingEvidence', 'resumeCondition', 'evidenceRevision')
-    if block.get('kind') != 'external_evidence' or not all(text(block.get(k)) for k in required):
+    if (block.get('kind') != 'external_evidence' or not all(text(block.get(k)) for k in required)
+            or block.get('evidenceRevision') != item.get('evidenceRevision')):
         return False
     # 每一项都是实际调查记录的引用；不适用时引用解释原因的段落，不能用布尔值代替证据。
     if not all(text(attempts.get(k)) for k in ('source', 'implementation', 'data', 'verification')):
@@ -96,6 +103,117 @@ def order(issue):
     return (item.get('feedbackDate') or '', issue.get('created_at') or '', issue['id'])
 
 
+def candidate_set_hash(candidate_ids):
+    payload = json.dumps(sorted(candidate_ids), ensure_ascii=False, separators=(',', ':'))
+    return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
+
+def verified_record(record):
+    return (isinstance(record, dict) and text(record.get('attachmentId'))
+            and re.fullmatch(r'[0-9a-f]{64}', record.get('sha256') or '') is not None
+            and record.get('readbackHashVerified') is True)
+
+
+def round_candidates(scan, issues, agent_id):
+    """用冻结清单的身份摘要核对完整登记，防止少登记一项后提前进入修复。"""
+    round_info = meta(scan, 'dailyRound')
+    if (round_info.get('schemaVersion') != 1 or round_info.get('policy') != ROUND_POLICY
+            or round_info.get('state') not in ROUND_STATES):
+        raise QueueError('本轮调查协议或阶段无效')
+    if not verified_record(round_info.get('candidateManifest')):
+        raise QueueError('本轮冻结清单缺少真实附件及哈希回读')
+    rows = [row for row in issues if meta(row, 'dailyInvestigation').get('roundId') == scan['id']]
+    identities = [meta(row, 'dailyInvestigation')['candidateId'] for row in rows]
+    if (type(round_info.get('candidateCount')) is not int or round_info['candidateCount'] < 0
+            or len(rows) != round_info['candidateCount'] or len(set(identities)) != len(rows)
+            or candidate_set_hash(identities) != round_info.get('candidateSetSha256')):
+        raise QueueError('本轮候选数量或身份与冻结清单不一致')
+    pending = []
+    for row in sorted(rows, key=order):
+        item = meta(row, 'dailyInvestigation')
+        if item.get('sourceScanId') != scan['id'] or row.get('parent_issue_id') != scan['id']:
+            raise QueueError('本轮调查任务与真实原扫描关系不一致')
+        if row.get('assignee_id') not in (None, agent_id):
+            raise QueueError('本轮调查已交由其他执行者，不能接管')
+        if row.get('status') in {'cancelled', 'canceled'} or item['state'] in {'paused', 'cancelled'}:
+            raise QueueError('本轮包含人工暂停或取消项，须核对决定，不能当作调查完成')
+        state = item['state']
+        record = item.get('investigationRecord') or {}
+        concluded = (verified_record(record) and text(item.get('evidenceRevision'))
+                     and record.get('evidenceRevision') == item['evidenceRevision'])
+        if state in FIXABLE:
+            concluded = concluded and valid_confirmation(item)
+        elif state == 'suspended_external':
+            concluded = concluded and valid_external_block(item)
+        elif state in {'duplicate', 'excluded', 'cs_followed'}:
+            concluded = concluded and text(item.get('conclusionRef'))
+        else:
+            concluded = False
+        if not concluded:
+            if row.get('status') == 'done':
+                raise QueueError('已关闭调查缺少有效结论与证据，不能作为调查完成或自动重开')
+            pending.append(row)
+    return rows, pending
+
+
+def round_plan(scan, issues, by_id, agent_id):
+    info = meta(scan, 'dailyRound')
+    if info.get('schemaVersion') != 1 or info.get('policy') != ROUND_POLICY or info.get('state') not in ROUND_STATES:
+        raise QueueError('本轮调查协议或阶段无效')
+    if info['state'] == 'collecting':
+        return {'action': 'collect_sources', 'issueId': scan['id'], 'reason': '先完成本轮来源读取，成功窗口不重采'}
+    if info.get('registrationComplete') is not True:
+        return {'action': 'register_round', 'issueId': scan['id'], 'reason': '只登记本轮冻结清单，不导入历史积压'}
+    rows, pending = round_candidates(scan, issues, agent_id)
+    if pending:
+        if info.get('investigationComplete') is True or info['state'] in {'preparing_repair', 'repairing'}:
+            raise QueueError('调查完成标记与逐条证据矛盾，禁止提前修复')
+        return {'action': 'investigate', 'issueId': pending[0]['id'], 'roundId': scan['id'],
+                'remaining': len(pending), 'reason': '先调查完本轮全部候选，已确认项暂不启动修复'}
+    if info.get('investigationComplete') is not True or not verified_record(info.get('investigationIndex')):
+        return {'action': 'finalize_round', 'issueId': scan['id'], 'reason': '逐条调查已留档，先汇总并回读本轮完整调查索引'}
+    confirmed = [row for row in rows if meta(row, 'dailyInvestigation')['state'] in FIXABLE]
+    if meta(scan, 'dailyScan').get('coverageComplete') is not True:
+        return {'action': 'attention', 'issueId': scan['id'], 'reason': '已保留调查结论；原扫描缺源，只恢复失败来源后修复'}
+    if not confirmed:
+        return {'action': 'complete_round', 'issueId': scan['id'], 'reason': '本轮全部调查完成，无新增可修项'}
+    batch = meta(scan, 'dailyBatch')
+    if not batch.get('bugIds'):
+        return {'action': 'prepare_round_repair', 'issueId': scan['id'],
+                'investigationIds': [row['id'] for row in sorted(confirmed, key=order)],
+                'reason': '全部调查已结束，为已确认项登记唯一固定修复队列；部分登记先恢复现场'}
+    bugs = round_bugs(scan, confirmed, by_id)
+    bug_ids = batch['bugIds']
+    if batch.get('state') == 'finished_with_skips':
+        return {'action': 'complete_round', 'issueId': scan['id'], 'outcome': 'finished_with_skips',
+                'reason': '保留真人跳过与未完成范围，不将跳过项标为完整交付'}
+    if (batch.get('state') != 'completed' or batch.get('outcome') != 'engineering_delivery_completed'
+            or batch.get('deliveredBugIds') != bug_ids or not all(verified_delivery(batch, bug) for bug in bugs)):
+        raise QueueError('本轮修复尚未完整交付，不能结束本轮')
+    return {'action': 'complete_round', 'issueId': scan['id'], 'reason': '本轮全部调查与固定修复交付已核验'}
+
+
+def round_bugs(scan, confirmed, by_id):
+    batch = meta(scan, 'dailyBatch')
+    confirmed_by_id = {row['id']: row for row in confirmed}
+    bug_ids = batch['bugIds']
+    if not isinstance(bug_ids, list) or len(set(bug_ids)) != len(bug_ids) or batch.get('total') != len(bug_ids):
+        raise QueueError('本轮固定修复清单数量无效')
+    bugs = [by_id.get(key) for key in bug_ids]
+    for index, bug in enumerate(bugs, 1):
+        item = meta(bug, 'dailyBug') if bug else {}
+        if (not bug or bug.get('parent_issue_id') != scan['id'] or item.get('batchId') != scan['id']
+                or item.get('mode') != 'bug' or item.get('index') != index or item.get('total') != len(bug_ids)):
+            raise QueueError('本轮修复任务缺失或真实父子关系、队列位置错误')
+        investigation = confirmed_by_id.get(item.get('investigationIssueId'))
+        if not investigation or item.get('candidateId') != meta(investigation, 'dailyInvestigation')['candidateId']:
+            raise QueueError('修复任务与已确认调查的候选身份不一致')
+    related = [meta(bug, 'dailyBug').get('investigationIssueId') for bug in bugs]
+    if len(set(related)) != len(related) or set(related) != set(confirmed_by_id):
+        raise QueueError('修复队列与本轮确认项不一致')
+    return bugs
+
+
 def next_action(issues, runs, *, project_id, agent_id, current_issue_id=None, now=None):
     """只使用已保存的事实决策，不把计划当作已启动，也不改变固定批次的游标。"""
     now = now or dt.datetime.now(dt.timezone.utc)
@@ -131,6 +249,17 @@ def next_action(issues, runs, *, project_id, agent_id, current_issue_id=None, no
     if active_batches:
         batch_issue = active_batches[0]
         batch = meta(batch_issue, 'dailyBatch')
+        scan = by_id.get(batch.get('sourceScanId')) if batch.get('mode') == 'repair' else batch_issue
+        if scan and meta(scan, 'dailyRound'):
+            info = meta(scan, 'dailyRound')
+            if info.get('registrationComplete') is not True:
+                raise QueueError('调查清单尚未登记完成，禁止启动或恢复修复')
+            members, pending = round_candidates(scan, issues, agent_id)
+            if (pending or info.get('investigationComplete') is not True
+                    or not verified_record(info.get('investigationIndex'))
+                    or meta(scan, 'dailyScan').get('coverageComplete') is not True):
+                raise QueueError('本轮全部调查及来源覆盖尚未完成，禁止启动或恢复修复')
+            round_bugs(scan, [row for row in members if meta(row, 'dailyInvestigation')['state'] in FIXABLE], by_id)
         if batch.get('mode') == 'repair' and not batch.get('bugIds'):
             return {'action': 'reconcile_repair', 'batchId': batch_issue['id'],
                     'issueId': batch.get('investigationIssueId'), 'reason': '恢复已登记批次的子项与队列，不重复建批次'}
@@ -151,86 +280,13 @@ def next_action(issues, runs, *, project_id, agent_id, current_issue_id=None, no
             return {'action': 'attention', 'issueId': current['id'], 'reason': '按原修复流程恢复阻塞，不绕过交付门槛或真人暂停'}
         return {'action': 'resume_repair', 'issueId': current['id'], 'batchId': batch_issue['id']}
 
-    # 导入回执属于原扫描；新扫描即使零候选，也不能遮蔽旧扫描尚未登记的积压。
-    scans = [issue for issue in issues if meta(issue, 'dailyScan') and issue.get('status') not in STOPPED]
-    for scan_issue in sorted(scans, key=lambda row: (row.get('created_at') or '', row['id'])):
-        scan = meta(scan_issue, 'dailyScan')
-        pending = max(scan.get('currentPending') or 0, scan.get('cumulativePending') or 0,
-                      (scan.get('counts') or {}).get('verification_blocked') or 0)
-        imported = meta(scan_issue, 'dailyInvestigationImport')
-        attachment = scan.get('pendingCandidatesAttachmentId')
-        registered = imported.get('registeredCandidateCount')
-        registered_total = sum(bool(meta(row, 'dailyInvestigation')) for row in issues)
-        if pending and not (imported.get('schemaVersion') == 1 and imported.get('completed') is True
-                            and attachment and imported.get('pendingAttachmentId') == attachment
-                            and imported.get('sourceRecordCount') == pending
-                            and type(registered) is int and 1 <= registered <= registered_total
-                            and re.fullmatch(r'[0-9a-f]{64}', imported.get('sourceSha256') or '')):
-            return {'action': 'register_investigations', 'issueId': scan_issue['id'], 'attachmentId': attachment,
-                    'reason': '先核对最新待验证附件并登记全部积压，不能把未导入记录报成 idle'}
-
-    runnable, checks, coverage_waiters = [], [], []
-    for issue in sorted(investigations, key=order):
-        item = meta(issue, 'dailyInvestigation')
-        origin = by_id.get(item.get('sourceScanId'))
-        if not origin or issue.get('parent_issue_id') != origin['id']:
-            raise QueueError('调查任务缺少原扫描或真实父子关系不符')
-        owner = issue.get('assignee_id')
-        if owner and owner != agent_id:
-            raise QueueError(f"{issue['id']} 已交由其他执行者，不能接管")
-        related = [batch for batch in batches
-                   if meta(batch, 'dailyBatch').get('investigationIssueId') == issue['id']]
-        if len(related) > 1:
-            raise QueueError('一个调查任务关联多个修复批次')
-        if related:
-            batch_issue = related[0]
-            batch = meta(batch_issue, 'dailyBatch')
-            if item.get('repairBatchId') not in (None, batch_issue['id']):
-                raise QueueError('调查任务与修复批次的关联不一致')
-            if batch.get('state') == 'completed' and batch.get('outcome') == 'engineering_delivery_completed':
-                bug_ids = batch['bugIds']
-                if (not isinstance(bug_ids, list) or len(bug_ids) != 1
-                        or batch.get('deliveredBugIds') != bug_ids):
-                    raise QueueError('调查修复批次缺少完整交付记录')
-                bug_issue = by_id.get(bug_ids[0])
-                bug = meta(bug_issue, 'dailyBug') if bug_issue else {}
-                if (not bug_issue or bug_issue.get('parent_issue_id') != batch_issue['id']
-                        or bug.get('batchId') != batch_issue['id'] or not verified_delivery(batch, bug_issue)):
-                    raise QueueError('修复批次与 Bug 的实际交付版本不一致')
-                return {'action': 'complete_investigation', 'issueId': issue['id'], 'batchId': batch_issue['id']}
-            # 取消/跳过后的现场只留人工处理，不把它重新包装成另一轮修复。
-            continue
-        if item.get('repairBatchId') or item.get('state') == 'waiting_repair':
-            raise QueueError('调查指向的修复批次缺失，须回读恢复，不能重复创建')
-        state = item['state']
-        if state == 'suspended_external' and valid_external_block(item):
-            block = item['blocker']
-            if item.get('evidenceRevision') != block['evidenceRevision']:
-                runnable.append((issue, 'investigate', '外部证据版本已变化，重新验证'))
-            elif timestamp(block['nextCheckAt']) <= now:
-                checks.append((issue, 'check_external_evidence', '到期只检查恢复条件，不重复调查或采集'))
-            continue
-        coverage = bool(origin and meta(origin, 'dailyScan').get('coverageComplete') is True)
-        if state == 'confirmed' and valid_confirmation(item):
-            if coverage:
-                runnable.append((issue, 'prepare_repair', '已确认可修且原来源覆盖完整，建立独立固定修复批次'))
-            else:
-                coverage_waiters.append(issue)
-        else:
-            reason = ('挂起依据不完整，继续补证验证' if state == 'suspended_external'
-                      else '继续调查；确认前补齐行为、验证、查重和原来源覆盖证据')
-            runnable.append((issue, 'investigate', reason))
-    if runnable or checks:
-        # 到期检查有界且优先于普通调查，避免持续新增的可执行项饿死外部证据恢复检查。
-        priority = {'prepare_repair': 0, 'check_external_evidence': 1, 'investigate': 2}
-        issue, action, reason = min(runnable + checks, key=lambda row: (priority[row[1]], order(row[0])))
-        return {'action': action, 'issueId': issue['id'], 'reason': reason}
-    if coverage_waiters:
-        issue = coverage_waiters[0]
-        return {'action': 'attention', 'issueId': issue['id'],
-                'sourceScanId': meta(issue, 'dailyInvestigation')['sourceScanId'],
-                'reason': '已确认项等待原扫描缺失来源恢复；不要重复验证或在调查入口重采'}
-    return {'action': 'idle', 'reason': '没有可执行项；真正缺外部证据的项保留恢复条件'}
+    rounds = [issue for issue in issues if meta(issue, 'dailyRound')
+              and meta(issue, 'dailyRound').get('state') != 'completed' and issue.get('status') not in STOPPED]
+    if len(rounds) > 1:
+        raise QueueError('存在多个未完成调查轮次，须核对现场，不能合并或跳过本轮')
+    if rounds:
+        return round_plan(rounds[0], issues, by_id, agent_id)
+    return {'action': 'idle', 'reason': '没有未完成的新流程轮次；历史待调查及附件不自动恢复或导入'}
 
 
 def query(cli, args):
@@ -299,8 +355,9 @@ def main():
         else:
             cli = ['multica', '--server-url', args.server_url, '--workspace-id', args.workspace_id]
             issues, runs = snapshot(cli, args.project, args.agent, args.current_issue)
-        print(json.dumps(next_action(issues, runs, project_id=args.project, agent_id=args.agent,
-                                     current_issue_id=args.current_issue), ensure_ascii=False))
+        plan = next_action(issues, runs, project_id=args.project, agent_id=args.agent,
+                           current_issue_id=args.current_issue)
+        print(json.dumps({'protocolVersion': PROTOCOL_VERSION, **plan}, ensure_ascii=False))
     except (QueueError, OSError, KeyError, json.JSONDecodeError) as error:
         print(f'无法生成接续计划：{error}', file=sys.stderr)
         return 1
