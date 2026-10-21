@@ -151,10 +151,9 @@ def next_action(issues, runs, *, project_id, agent_id, current_issue_id=None, no
             return {'action': 'attention', 'issueId': current['id'], 'reason': '按原修复流程恢复阻塞，不绕过交付门槛或真人暂停'}
         return {'action': 'resume_repair', 'issueId': current['id'], 'batchId': batch_issue['id']}
 
-    # 最新待验证附件含历史积压；没有完成导入回执时，不能把尚未建任务的记录当作空队列。
+    # 导入回执属于原扫描；新扫描即使零候选，也不能遮蔽旧扫描尚未登记的积压。
     scans = [issue for issue in issues if meta(issue, 'dailyScan') and issue.get('status') not in STOPPED]
-    if scans:
-        scan_issue = max(scans, key=lambda row: (row.get('created_at') or '', row['id']))
+    for scan_issue in sorted(scans, key=lambda row: (row.get('created_at') or '', row['id'])):
         scan = meta(scan_issue, 'dailyScan')
         pending = max(scan.get('currentPending') or 0, scan.get('cumulativePending') or 0,
                       (scan.get('counts') or {}).get('verification_blocked') or 0)

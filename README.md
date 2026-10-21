@@ -84,11 +84,13 @@ Cloudflare 使用 `pnpm dev:cf`、`pnpm build:cf` 和 `pnpm deploy:cf`，共享�
 
 值守 Agent 的规则在 [DAILY-BUG-DUTY-PROMPT.md](DAILY-BUG-DUTY-PROMPT.md)，每日扫描 Autopilot 的任务正文在 [DAILY-BUG-SCAN-PROMPT.md](DAILY-BUG-SCAN-PROMPT.md)。每天 08:00 的扫描登记新候选，并从原扫描的最新待验证附件恢复积压；成功采集的窗口复用既有证据。调查入口只补读指定原帖、会话或 thread，不执行日采集。
 
+从已有反馈立即接续可建立 `mode=resume` 任务，共用同一持久队列，仅执行登记与调度；此入口不调用 collect-daily，不生成新的扫描统计，也不覆盖原扫描已完成的修复批次。
+
 待验证项保存为原扫描下的独立 `mode=investigate` 任务，`dailyInvestigation` 记录稳定候选身份、原反馈日、调查状态、证据引用和下一动作。先补证与验证，确认可修后建立独立的固定修复批次，沿用原 CI、动态验收、PR、完整 HTML 和交付回读门槛；完整交付后继续调查下一项。修复批次的 `dailyBatch.mode=repair`，通过 `sourceScanId` 与真实父任务关联原扫描，不能覆盖原 scan 已完成的队列或增加一次采集记录。
 
 只有实际调查过原来源、实现、数据和验证路径，仍确实缺外部材料时才能 `suspended_external`。挂起项保存缺失材料、各路径的尝试引用、恢复条件和来源版本；有新证据时恢复，到期但没有变化时只更新恢复检查时间，至少间隔 24 小时。历史 needs_evidence/verification_blocked 没有充分依据的，迁移为 ready。人工取消项保持取消。
 
-`scripts/duty-queue.py` 通过原生 Multica CLI 完整分页读取任务，生成一项只读计划：优先恢复未结束修复批次，核对积压导入，再处理已确认项、到期的外部恢复条件与可调查项。脚本不修改任务、不启动运行；Agent 按 Prompt 重读、保存 intent、执行原生 assign（已归属自身的中断项用 rerun），再回读真实 runId 后结束当前运行。下一次每日扫描恢复中断现场；普通评论或一份计划不作为自动唤醒的证明。
+`scripts/duty-queue.py` 通过原生 Multica CLI 完整分页读取任务，生成一项只读计划：优先恢复未结束修复批次，逐个核对各原扫描的积压导入回执，再处理已确认项、到期的外部恢复条件与可调查项。新扫描零候选或已有导入回执时，仍检查较早扫描的未登记附件。脚本不修改任务、不启动运行；Agent 按 Prompt 重读、保存 intent、执行原生 assign（已归属自身的中断项用 rerun），再回读真实 runId 后结束当前运行。下一次每日扫描恢复中断现场；普通评论或一份计划不作为自动唤醒的证明。
 
 ```bash
 python3 scripts/duty-queue.py \

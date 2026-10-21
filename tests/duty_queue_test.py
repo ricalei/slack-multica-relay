@@ -86,6 +86,35 @@ class QueueTests(unittest.TestCase):
         scan['pendingCandidatesAttachmentId'] = 'new-attachment'
         self.assertEqual(self.plan(candidate())['action'], 'register_investigations')
 
+    def test_new_empty_scan_does_not_hide_older_pending_attachment(self):
+        self.scan['metadata']['dailyScan'].update(currentPending=2, pendingCandidatesAttachmentId='old-pending')
+        newer = issue('new-scan', dailyScan={'targetDate': '2026-10-21', 'currentPending': 0})
+        newer['created_at'] = '2026-10-22T00:00:00Z'
+        result = self.plan(newer)
+        self.assertEqual((result['action'], result['issueId'], result['attachmentId']),
+                         ('register_investigations', 'scan', 'old-pending'))
+
+    def test_import_receipts_are_checked_for_each_original_scan(self):
+        self.scan['metadata']['dailyScan'].update(currentPending=2, pendingCandidatesAttachmentId='old-pending')
+        self.scan['metadata']['dailyInvestigationImport'] = {
+            'schemaVersion': 1, 'completed': True, 'pendingAttachmentId': 'old-pending',
+            'sourceSha256': 'a' * 64, 'sourceRecordCount': 2, 'registeredCandidateCount': 1,
+        }
+        newer = issue('new-scan', dailyScan={'targetDate': '2026-10-21', 'currentPending': 1,
+                                            'pendingCandidatesAttachmentId': 'new-pending'},
+                      dailyInvestigationImport={'schemaVersion': 1, 'completed': True,
+                                                'pendingAttachmentId': 'new-pending', 'sourceSha256': 'b' * 64,
+                                                'sourceRecordCount': 1, 'registeredCandidateCount': 1})
+        newer['created_at'] = '2026-10-22T00:00:00Z'
+        self.assertEqual(self.plan(newer, candidate())['action'], 'investigate')
+        self.scan['metadata']['dailyScan']['pendingCandidatesAttachmentId'] = 'old-updated'
+        result = self.plan(newer, candidate())
+        self.assertEqual((result['action'], result['issueId']), ('register_investigations', 'scan'))
+        self.scan['metadata']['dailyScan']['pendingCandidatesAttachmentId'] = 'old-pending'
+        newer['metadata']['dailyScan']['pendingCandidatesAttachmentId'] = 'new-updated'
+        result = self.plan(newer, candidate())
+        self.assertEqual((result['action'], result['issueId']), ('register_investigations', 'new-scan'))
+
     def test_pause_and_cancel_are_not_interpreted_as_a_crashed_run(self):
         row = candidate(state='paused')
         self.assertEqual(self.plan(row)['action'], 'idle')

@@ -6,7 +6,7 @@
 
 ## 入口与范围
 
-- 先回读当前 Issue、真实父任务、metadata、触发评论及已有运行。`mode=scan` 做三源采集、筛选、候选登记和调度；`mode=investigate` 对单个待验证候选补证、验证、查重并调度；两者都不修改业务实现。`mode=bug` 处理当前 Bug 或已交付项的审查反馈；`mode=gate_test` 仅执行任务正文明确的隔离接续测试。未知 mode 先核对，不默认启动修复。
+- 先回读当前 Issue、真实父任务、metadata、触发评论及已有运行。`mode=scan` 做三源采集、筛选、候选登记和调度；`mode=resume` 仅恢复已有待验证队列与调度，禁止调用 collect-daily；`mode=investigate` 对单个待验证候选补证、验证、查重并调度；这三种入口都不修改业务实现。`mode=bug` 处理当前 Bug 或已交付项的审查反馈；`mode=gate_test` 仅执行任务正文明确的隔离接续测试。未知 mode 先核对，不默认启动修复。
 - 每日 Autopilot 创建的扫描任务可能尚无 metadata。仅当当前任务正文明确 `mode=scan`，且回读确认属于本 Agent 和每日值守项目时，初始化 `dailyBatch` 为 mode=scan、state=scanning、bugIds=[]、index=0、total=0、currentIssueId=null、deliveryVersion=0、advancePolicy=after_verified_delivery、deliveredBugIds=[]、completedDeliveries=[]，写后回读再采集。已有 metadata 时复用，不覆盖运行或交付现场。
 - 仅接受 Canny、Facebook、Intercom 来源；不以 Jira CS 为新增工作入口，不创建/修改 Jira。可经 jira skill 只读查询 CS 工单用于查重；代码和历史决定可按需只读查询。
 - 只修复有明确正确行为依据、可验证偏差且无需新增产品取舍的代码 Bug。需要产品或设计决定的直接排除，只保留排除理由，不生成决策材料、不转交周度小队。信息不足先按现有能力补证，未复现不等于产品问题。
@@ -65,6 +65,8 @@ Multica 任务操作一律用原生 CLI：先看帮助，核对服务、GRM 工�
 ### 待验证调查队列与挂起门槛
 
 待验证项必须成为本项目可执行的独立任务，不能把 `pending-candidates.json` 或 `verification_blocked` 当作调查已完成。每天 scan 在登记新反馈后恢复旧队列；每次调查完成、挂起、排除、查重命中，以及最后一个修复完整交付后，都执行「统一接续」。一次只处理一项，不等待逐项人工确认。
+
+真人要求从已有反馈继续时，可使用独立的 `mode=resume` 接续任务，metadata `dailyResume={mode:"resume",state:"running"}`，真实父任务指向相关原扫描。此入口只执行登记与迁移、统一接续，复用原扫描的证据与采集进度，不创建 dailyScan、不初始化或覆盖原 dailyBatch、不写新增采集台账。回读下一任务真实启动回执后保存 dailyResume.state=dispatched 与 nextIssueId/runId 并结束本次运行；没有可执行项时保存 idle 和实际挂起/恢复条件。它与每日 scan 共用同一调查队列，不新增定时。
 
 登记与迁移：
 
@@ -203,6 +205,29 @@ Story 默认最多 2 条，写清用户、场景、操作、预期、实际偏�
 按 `moe-opc/references/communications/slack-pr-review.md` 的本地 HTML 附件规则发送和回读，不启动其它 OPC 阶段。精简回复不降低完整报告、真实版本绑定或人工合并/发布权限要求。保存真实发送和附件回执；通知失败记录待发内容，不伪造成功。
 
 自动接续的条件是当前范围内修复与必要检查完成、动态验收和充分证据支持结论、PR 与完整 HTML 对应最终版本、交付消息及附件均已回读。run completed、本地测试成功、PR 创建、报告文件存在、CI 状态或阶段报告均不能单独放行。满足后，保存当前 `dailyBug.state=delivered`、`completeDelivery=true`、`reviewState=pending_human_review`、递增 deliveryVersion、PR head、报告版本、交付时间和真实回执；任务进入 in_review，人工审查与后续独立修复可以同时进行。父批次记录 deliveredBugIds 与每项实际交付版本；完成工程交付不伪造真人确认、Approve、合并或上线记录。
+
+`dailyBug.deliveryVersion` 为正整数。父批次 `completedDeliveries` 每条记录使用以下结构，与 `duty-queue.py` 的交付恢复校验一致；示例中的占位符必须替换为实际值，两个 readback 标记仅在对应真实回读完成后才能为 true：
+
+```json
+{
+  "issueId": "<Bug Issue UUID>",
+  "deliveryVersion": 1,
+  "pr": "<主 PR URL>",
+  "prHead": "<主 PR 最终 40 位十六进制 SHA>",
+  "report": {
+    "version": 1,
+    "sha256": "<最终 HTML 字节的 64 位十六进制 SHA-256>",
+    "multicaAttachmentId": "<实际报告附件 UUID>",
+    "readbackHashVerified": true
+  },
+  "delivery": {
+    "permalink": "<真实交付根消息链接>",
+    "readbackVerified": true
+  }
+}
+```
+
+跨仓时 `pr/prHead` 记录主 PR，另用 `prs` 保存全部 `{url,head}`；完整 HTML 必须绑定全部 PR 的实际版本，所有仓库都满足原交付门槛后才设置 completeDelivery。已有回执若采用其它字段，先根据原产物与真实回读核验并补齐上述字段，不能只为满足格式而补写成功标记。
 
 随后按固定 bugIds 选择下一项，先保存父任务的新 index/currentIssueId/state=running，再只指派下一项自身启动并回读 queued/dispatched/running；保存该交付版本与下一项的实际 dispatch 回执后结束当前运行。下一项仅排队，须在前项运行结束后占用唯一名额；不得占着当前运行等待它开工或完成。写入/启动结果不明先查现状，已有运行不重复启动。恢复时以当前队列位置、交付版本和已有回执判断接续是否已执行，旧任务重跑或重复确认不能回退 index 或再次启动下一项。通知或调度真实失败时保存具体缺口与待恢复动作，不用未完成交付或假回执推进。
 
