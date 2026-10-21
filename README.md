@@ -82,15 +82,17 @@ Cloudflare 使用 `pnpm dev:cf`、`pnpm build:cf` 和 `pnpm deploy:cf`，共享�
 
 ## 每日值守调查闭环
 
-值守 Agent 的规则在 [DAILY-BUG-DUTY-PROMPT.md](DAILY-BUG-DUTY-PROMPT.md)，每日扫描 Autopilot 的任务正文在 [DAILY-BUG-SCAN-PROMPT.md](DAILY-BUG-SCAN-PROMPT.md)。每天 08:00 的扫描登记新候选，并从原扫描的最新待验证附件恢复积压；成功采集的窗口复用既有证据。调查入口只补读指定原帖、会话或 thread，不执行日采集。
+每日流程保留两个 Agent：「GRM 每日 Bug 值守」和独立的「GRM 每日值守看板」。值守 Agent 每天北京时间 03:00 按固定阶段执行：三源采集 → 固定本轮清单 → 全部逐条调查与留档 → 汇总结论 → 固定修复队列 → 逐条完整交付。看板 Agent 的规则、脚本和 10:00 定时保持原样。
 
-从已有反馈立即接续可建立 `mode=resume` 任务，共用同一持久队列，仅执行登记与调度；此入口不调用 collect-daily，不生成新的扫描统计，也不覆盖原扫描已完成的修复批次。
+值守规则在 [DAILY-BUG-DUTY-PROMPT.md](DAILY-BUG-DUTY-PROMPT.md)，扫描 Autopilot 的任务正文在 [DAILY-BUG-SCAN-PROMPT.md](DAILY-BUG-SCAN-PROMPT.md)。采集按每来源最后成功日期补到昨天，已成功窗口复用。调查只补读指定原帖、会话或 thread，不调用日采集，Facebook、Intercom 不重复采集。
 
-待验证项保存为原扫描下的独立 `mode=investigate` 任务，`dailyInvestigation` 记录稳定候选身份、原反馈日、调查状态、证据引用和下一动作。先补证与验证，确认可修后建立独立的固定修复批次，沿用原 CI、动态验收、PR、完整 HTML 和交付回读门槛；完整交付后继续调查下一项。修复批次的 `dailyBatch.mode=repair`，通过 `sourceScanId` 与真实父任务关联原扫描，不能覆盖原 scan 已完成的队列或增加一次采集记录。
+每轮扫描用 `dailyRound` 冻结疑似 Bug 的数量和 candidateId 集合摘要，清单与完整调查过程放真实附件；metadata 只保留状态和回执。每条候选登记为原扫描下的调查子任务，`dailyInvestigation.roundId` 与 sourceScanId 指向当前扫描。确认一项后继续调查下一项，不能提前开始修复。每条确认、排除、重复、已有工单或外部缺证结论都须有可回读的报告；未调查、技术失败和泛化缺口不算完成。
 
-只有实际调查过原来源、实现、数据和验证路径，仍确实缺外部材料时才能 `suspended_external`。挂起项保存缺失材料、各路径的尝试引用、恢复条件和来源版本；有新证据时恢复，到期但没有变化时只更新恢复检查时间，至少间隔 24 小时。历史 needs_evidence/verification_blocked 没有充分依据的，迁移为 ready。人工取消项保持取消。
+全部候选有依据的结论与完整调查索引回读后，才能设置 investigationComplete；三源覆盖完整后才建立原扫描的固定 dailyBatch。Bug 子任务用 investigationIssueId 对应调查项，全部确认项登记并回读后固定 total、bugIds 和当前位置。同一个值守 Agent 沿用现有修复、CI、动态验收、最终 HTML、PR 与交付回读门槛逐项执行，完整交付后推进固定队列，最后结束本轮。
 
-`scripts/duty-queue.py` 通过原生 Multica CLI 完整分页读取任务，生成一项只读计划：优先恢复未结束修复批次，逐个核对各原扫描的积压导入回执，再处理已确认项、到期的外部恢复条件与可调查项。新扫描零候选或已有导入回执时，仍检查较早扫描的未登记附件。脚本不修改任务、不启动运行；Agent 按 Prompt 重读、保存 intent、执行原生 assign（已归属自身的中断项用 rerun），再回读真实 runId 后结束当前运行。下一次每日扫描恢复中断现场；普通评论或一份计划不作为自动唤醒的证明。
+真正外部缺证必须保留原来源、实现、数据与验证路径的实际尝试、缺失材料和恢复条件，作为已调查结论保存在任务、完整报告与分类台账；值守 Agent 的 Slack 汇总不单列这些内容或数量，也不另发通知。不能把尚未调查项留在候选附件后报告扫描完成。旧扫描、旧 pending-candidates 和历史待调查已停止，仅用于追溯、查重，不自动导入新轮次。停止不删除证据，不改写已有修复与交付结果。
+
+`scripts/duty-queue.py` 通过原生 Multica CLI 完整分页读取现场，生成 protocolVersion=2 的只读计划。计划器核对固定身份集合、每条调查依据与报告回执、全轮索引、来源覆盖、确认项与修复清单，以及最终交付版本；一项确认不能越过其余未结束调查。脚本不写任务或启动运行，真实动作仍由 Agent 按“重读 → intent → 原生启动 → runId 回读 → 结束当前运行”执行。未知写入结果先查现状，不重复创建或派发。
 
 ```bash
 python3 scripts/duty-queue.py \
@@ -98,9 +100,9 @@ python3 scripts/duty-queue.py \
   --project <值守项目 UUID> --agent <值守 Agent UUID> --current-issue <当前 Issue UUID>
 ```
 
-隔离验证可额外传 `--snapshot <脱敏 JSON>`，输入为 `{"issues": [...], "runs": [...]}`，不访问服务。定向检查分别执行 `python3 -m unittest tests/duty_queue_test.py` 和 `python3 -m unittest tests/duty_board_test.py`。
+隔离验证可传 `--snapshot <脱敏 JSON>`，输入为 `{"issues": [...], "runs": [...]}`，不访问服务。定向检查为 `python3 -m unittest tests/duty_queue_test.py`。
 
-上线时先合入流程 PR，使 `origin/main` 中的调度脚本可读取，再按 AGENTS.md 核对线上 instructions 与 Autopilot description，替换占位符并只同步对应字段，写后回读。Agent 并发保持 1，原 08:00 扫描和 10:00 看板定时保持原值。首次扫描迁移原扫描最新附件中全部有效待验证记录，逐项按稳定标记查重、核对真实来源和数量；已有修复、取消及有工单跟进项不重复登记。配置同步不等于自动周期已实测，须用实际扫描、调查、修复和接续回执核验。
+线上同步先创建流程 PR，再按 AGENTS.md 核对线上 instructions 和 Autopilot description，仅更新对应字段及扫描的 03:00 Asia/Shanghai 定时。Prompt 中的 `<调度器提交 SHA>` 绑定本 PR 已推送并回读的完整提交 SHA，运行时精确 fetch/show 此版本，避免 PR 尚未合入时误用旧 origin/main 调度器；后续改动同步时重新绑定版本。保留值守并发 1、Runtime、模型与环境；看板配置不变。配置回读不等同于真实每日周期完成，不为验证配置擅自触发新采集。
 
 ## 每日值守看板
 
