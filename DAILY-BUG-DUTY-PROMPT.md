@@ -151,7 +151,7 @@ python3 <临时目录>/duty-queue.py \
 - `finalize_round`：核对全部固定身份与报告，汇总并回读调查索引、分类台账和扫描结果，保存 investigationComplete，再生成计划。
 - `prepare_round_repair`：按上方规则在原扫描登记唯一固定修复队列；存在部分登记先按稳定标记找回。每个 Bug 正文保留目标分支 CI、真实部署版本、动态验收、完整 HTML 与交付回读要求。
 - `resume_repair / reconcile_repair`：只按原修复流程恢复已登记队列，不插入其它候选或回退 index。新流程批次每次恢复也必须核对全轮调查与固定修复清单。
-- `complete_round`：无可修项时结束本轮；有修复时逐项核对真实完整交付及对应版本，再标记相关调查 delivered 和 dailyRound.state=completed。真人跳过保留 finished_with_skips，跳过项不能记为完整交付。
+- `complete_round`：无可修项时结束本轮；有修复时逐项核对真实完整交付及对应版本，再标记相关调查 delivered 和 dailyRound.state=completed。真人跳过按第 3 节保留父批次的完成状态、跳过结果与授权，跳过项不能记为完整交付。
 - `wait`：已有其它真实排队或运行项，记录回执并结束本次运行释放名额，不重复启动。
 - `idle`：没有未完成新轮次，等待下次现有 03:00 扫描；不从历史积压找新任务。
 - `attention` 或执行错误：保存具体矛盾、错误和最小恢复条件；不能伪装成已调查完成或没有 Bug。
@@ -266,7 +266,7 @@ Story 默认最多 2 条，写清用户、场景、操作、预期、实际偏�
 
 随后按固定 bugIds 选择下一项，先保存父任务的新 index/currentIssueId/state=running，再只指派下一项自身启动并回读 queued/dispatched/running；保存该交付版本与下一项的实际 dispatch 回执后结束当前运行。下一项仅排队，须在前项运行结束后占用唯一名额；不得占着当前运行等待它开工或完成。写入/启动结果不明先查现状，已有运行不重复启动。恢复时以当前队列位置、交付版本和已有回执判断接续是否已执行，旧任务重跑或重复确认不能回退 index 或再次启动下一项。通知或调度真实失败时保存具体缺口与待恢复动作，不用未完成交付或假回执推进。
 
-最后一项完整交付后将父批次标为 `state=completed`、`outcome=engineering_delivery_completed`、`currentIssueId=null`，父任务保留 in_review；发送一次批次汇总，列出每项 current/total、问题、Multica、PR 与报告链接和实际限制，集中供人工审查。随后按统一接续的 complete_round 核对本轮全部真实交付与版本，标记 dailyRound.state=completed；结束本轮，不回到历史调查队列，也不追加新候选。批次 completed 不表示人工验收、PR 合并或生产发布。真人明确跳过时保留 finished_with_skips 和授权评论，逐项说明缺口，不能宣称全部修复已交付或将跳过调查标为 delivered。
+最后一项完整交付后将父批次标为 `state=completed`、`outcome=engineering_delivery_completed`、`currentIssueId=null`，父任务保留 in_review；发送一次批次汇总，列出每项 current/total、问题、Multica、PR 与报告链接和实际限制，集中供人工审查。随后按统一接续的 complete_round 核对本轮全部真实交付与版本，标记 dailyRound.state=completed；结束本轮，不回到历史调查队列，也不追加新候选。批次 completed 不表示人工验收、PR 合并或生产发布。真人明确跳过且固定队列已结束时，父批次保存 `state=completed`、`outcome=finished_with_skips`、`currentIssueId=null` 和授权评论，逐项说明缺口，不能宣称全部修复已交付或将跳过调查标为 delivered。读取时兼容旧 `state=finished_with_skips` 写法，后续写入使用上述 state/outcome 组合。
 
 人工修改、暂停、取消或跳过仍通过对应 Multica 任务评论提出，核对真实作者、评论 ID、所属任务、交付版本和语义。要求返工时复用该 Bug 的分支、PR 和证据，串行修订、局部复验并更新报告与 deliveryVersion；更新父任务的该项交付记录，不把旧任务再放行一次或打乱已启动的队列。普通讨论不当作改动指令，首行为 `回告`、`确认发布`、`已回告`、`不回告` 的评论按第 4 节处理，确认通过仅记录该版本人工审查结果，不再作为下一项启动条件。明确跳过真实受阻项时保存授权评论与未完成范围，按固定顺序推进；跳过不计为完整交付。
 

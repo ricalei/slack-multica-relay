@@ -184,7 +184,9 @@ def round_plan(scan, issues, by_id, agent_id):
                 'reason': '全部调查已结束，为已确认项登记唯一固定修复队列；部分登记先恢复现场'}
     bugs = round_bugs(scan, confirmed, by_id)
     bug_ids = batch['bugIds']
-    if batch.get('state') == 'finished_with_skips':
+    # 跳过结果原本保存在 outcome；兼容既有 state 写法，不能将跳过项当作完整交付。
+    if (batch.get('state') == 'finished_with_skips'
+            or (batch.get('state') == 'completed' and batch.get('outcome') == 'finished_with_skips')):
         return {'action': 'complete_round', 'issueId': scan['id'], 'outcome': 'finished_with_skips',
                 'reason': '保留真人跳过与未完成范围，不将跳过项标为完整交付'}
     if (batch.get('state') != 'completed' or batch.get('outcome') != 'engineering_delivery_completed'

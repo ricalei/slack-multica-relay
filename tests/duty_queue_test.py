@@ -262,6 +262,32 @@ class RoundTests(unittest.TestCase):
         self.assertEqual((result['action'], result['outcome']), ('complete_round', 'finished_with_skips'))
         self.assertNotIn('completeDelivery', bug['metadata']['dailyBug'])
 
+    def test_completed_batch_with_human_skip_outcome_can_close_round(self):
+        row = candidate(state='waiting_repair')
+        freeze(self.scan, [row], complete=True)
+        bug = add_repair(self.scan, [row], 'completed')[0]
+        self.scan['metadata']['dailyBatch'].update(
+            outcome='finished_with_skips', currentIssueId=None, deliveredBugIds=[], completedDeliveries=[])
+        before = copy.deepcopy([self.scan, row, bug])
+        result = self.plan(row, bug)
+        self.assertEqual((result['action'], result['outcome']), ('complete_round', 'finished_with_skips'))
+        self.assertEqual([self.scan, row, bug], before)
+        self.assertEqual(row['metadata']['dailyInvestigation']['state'], 'waiting_repair')
+        self.assertNotIn('completeDelivery', bug['metadata']['dailyBug'])
+
+    def test_completed_skip_still_requires_round_evidence_and_repair_identity(self):
+        row = candidate(state='waiting_repair')
+        freeze(self.scan, [row], complete=True)
+        bug = add_repair(self.scan, [row], 'completed')[0]
+        self.scan['metadata']['dailyBatch'].update(outcome='finished_with_skips', currentIssueId=None)
+        row['metadata']['dailyInvestigation']['investigationRecord']['readbackHashVerified'] = False
+        with self.assertRaises(queue.QueueError):
+            self.plan(row, bug)
+        row['metadata']['dailyInvestigation']['investigationRecord']['readbackHashVerified'] = True
+        bug['metadata']['dailyBug']['candidateId'] = 'another-feedback'
+        with self.assertRaises(queue.QueueError):
+            self.plan(row, bug)
+
     def test_legacy_attachments_and_candidates_are_not_reimported_or_restarted(self):
         self.scan['metadata']['dailyScan'].update(currentPending=494, pendingCandidatesAttachmentId='legacy')
         row = candidate()
