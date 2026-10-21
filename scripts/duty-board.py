@@ -467,11 +467,17 @@ def bug_cohort(issue, issues_by_id, ledger):
     batch = issues_by_id.get(meta.get('batchId') or issue.get('parent_issue_id'))
     if not batch:
         return None
-    scan = _meta(batch, 'dailyScan') or {}
-    record = ledger.get((batch['identifier'], 'scan')) or {}
+    source = batch
+    repair = _meta(batch, 'dailyBatch') or {}
+    if repair.get('mode') == 'repair':
+        source = issues_by_id.get(repair.get('sourceScanId'))
+        if not source or batch.get('parent_issue_id') != source['id']:
+            return None
+    scan = _meta(source, 'dailyScan') or {}
+    record = ledger.get((source['identifier'], 'scan')) or {}
     feedback = scan.get('targetDate') or record.get('feedbackDate')
     # 历史非扫描批次可识别为范围外，不猜它属于哪一个反馈日。
-    return {'scanDate': scan_date(batch), 'feedbackDate': feedback, 'batch': batch['identifier']}
+    return {'scanDate': scan_date(source), 'feedbackDate': feedback, 'batch': batch['identifier']}
 
 
 def slack_thread(cli, permalink):

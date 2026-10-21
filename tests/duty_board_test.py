@@ -363,6 +363,20 @@ class CohortTests(unittest.TestCase):
         self.assertEqual(board_module.bug_cohort(issue, {'s': batch}, {})['scanDate'], '2026-10-14')
         self.assertIsNone(board_module.bug_cohort(issue, {}, {}))
 
+    def test_investigation_repair_keeps_original_scan_cohort_without_adding_collection(self):
+        scan = {'id': 'scan', 'identifier': 'S1', 'created_at': '2026-10-21T00:00:00Z',
+                'metadata': {'dailyScan': {'targetDate': '2026-10-20'}}}
+        batch = {'id': 'repair', 'identifier': 'R1', 'created_at': '2026-10-23T00:00:00Z',
+                 'parent_issue_id': 'scan',
+                 'metadata': {'dailyBatch': {'mode': 'repair', 'sourceScanId': 'scan'}}}
+        bug = {'parent_issue_id': 'repair', 'metadata': {'dailyBug': {'mode': 'bug', 'batchId': 'repair'}}}
+        cohort = board_module.bug_cohort(bug, {'scan': scan, 'repair': batch}, {})
+        self.assertEqual(cohort, {'scanDate': '2026-10-21', 'feedbackDate': '2026-10-20', 'batch': 'R1'})
+        self.assertNotIn('dailyScan', batch['metadata'])
+        self.assertIsNone(board_module.bug_cohort(bug, {'repair': batch}, {}))
+        batch['parent_issue_id'] = 'different-scan'
+        self.assertIsNone(board_module.bug_cohort(bug, {'scan': scan, 'repair': batch}, {}))
+
 
 
 class HtmlTests(unittest.TestCase):

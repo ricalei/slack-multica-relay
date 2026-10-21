@@ -80,6 +80,28 @@ Relay 将触发消息转为任务；上下文读取由 Agent 的 Prompt 和 Skil
 
 Cloudflare 使用 `pnpm dev:cf`、`pnpm build:cf` 和 `pnpm deploy:cf`，共享同一 consumer 与 QStash/Redis；构建推荐 Node.js 24。
 
+## 每日值守调查闭环
+
+值守 Agent 的规则在 [DAILY-BUG-DUTY-PROMPT.md](DAILY-BUG-DUTY-PROMPT.md)，每日扫描 Autopilot 的任务正文在 [DAILY-BUG-SCAN-PROMPT.md](DAILY-BUG-SCAN-PROMPT.md)。每天 08:00 的扫描登记新候选，并从原扫描的最新待验证附件恢复积压；成功采集的窗口复用既有证据。调查入口只补读指定原帖、会话或 thread，不执行日采集。
+
+从已有反馈立即接续可建立 `mode=resume` 任务，共用同一持久队列，仅执行登记与调度；此入口不调用 collect-daily，不生成新的扫描统计，也不覆盖原扫描已完成的修复批次。
+
+待验证项保存为原扫描下的独立 `mode=investigate` 任务，`dailyInvestigation` 记录稳定候选身份、原反馈日、调查状态、证据引用和下一动作。先补证与验证，确认可修后建立独立的固定修复批次，沿用原 CI、动态验收、PR、完整 HTML 和交付回读门槛；完整交付后继续调查下一项。修复批次的 `dailyBatch.mode=repair`，通过 `sourceScanId` 与真实父任务关联原扫描，不能覆盖原 scan 已完成的队列或增加一次采集记录。
+
+只有实际调查过原来源、实现、数据和验证路径，仍确实缺外部材料时才能 `suspended_external`。挂起项保存缺失材料、各路径的尝试引用、恢复条件和来源版本；有新证据时恢复，到期但没有变化时只更新恢复检查时间，至少间隔 24 小时。历史 needs_evidence/verification_blocked 没有充分依据的，迁移为 ready。人工取消项保持取消。
+
+`scripts/duty-queue.py` 通过原生 Multica CLI 完整分页读取任务，生成一项只读计划：优先恢复未结束修复批次，逐个核对各原扫描的积压导入回执，再处理已确认项、到期的外部恢复条件与可调查项。新扫描零候选或已有导入回执时，仍检查较早扫描的未登记附件。脚本不修改任务、不启动运行；Agent 按 Prompt 重读、保存 intent、执行原生 assign（已归属自身的中断项用 rerun），再回读真实 runId 后结束当前运行。下一次每日扫描恢复中断现场；普通评论或一份计划不作为自动唤醒的证明。
+
+```bash
+python3 scripts/duty-queue.py \
+  --server-url https://multica.devops.moego.dev --workspace-id <GRM 工作区 UUID> \
+  --project <值守项目 UUID> --agent <值守 Agent UUID> --current-issue <当前 Issue UUID>
+```
+
+隔离验证可额外传 `--snapshot <脱敏 JSON>`，输入为 `{"issues": [...], "runs": [...]}`，不访问服务。定向检查分别执行 `python3 -m unittest tests/duty_queue_test.py` 和 `python3 -m unittest tests/duty_board_test.py`。
+
+上线时先合入流程 PR，使 `origin/main` 中的调度脚本可读取，再按 AGENTS.md 核对线上 instructions 与 Autopilot description，替换占位符并只同步对应字段，写后回读。Agent 并发保持 1，原 08:00 扫描和 10:00 看板定时保持原值。首次扫描迁移原扫描最新附件中全部有效待验证记录，逐项按稳定标记查重、核对真实来源和数量；已有修复、取消及有工单跟进项不重复登记。配置同步不等于自动周期已实测，须用实际扫描、调查、修复和接续回执核验。
+
 ## 每日值守看板
 
 `scripts/duty-board.py` 只读汇总「GRM 每日 Bug 值守」的扫描批次漏斗：读取值守项目任务、字段台账任务 GRM-664 的 `<!-- duty-board:v1 -->` 评论、GitHub PR 的合并状态、Slack 交付 thread 上审查人的 🚫，以及下节的回告记录与回应跟踪，输出 `board.json`、`board.md`、`slack.md`，以及可直接打开、支持切换反馈日期的 `board.html`。「GRM 每日值守看板」Agent（Prompt 真源 [DUTY-BOARD-PROMPT.md](DUTY-BOARD-PROMPT.md)）由 Autopilot 每天 10:00 运行 `origin/main` 版本，发送到指定交付频道、在该消息 thread 上传 `board.html`，并追加到 GRM-665。本地预览：
@@ -90,7 +112,7 @@ python3 scripts/duty-board.py --project <值守项目 ID> --ledger-issue GRM-664
 
 HTML 默认展示昨天的反馈日，可在顶部切换 d1 起的任意反馈日（例如 `2026-10-13`）。选择项与趋势行同时标出扫描日和反馈日（如 10-13 扫描、10-12 反馈）。切换后同步更新该扫描批次的漏斗、截至所选反馈日的累计与 Bug 范围、每日趋势和该日逐条记录；历史扫描证据会内置在同一份 HTML 中，离线打开也可切换。Bug 的修复、上线与回告进度采用生成时的最新状态，不表示历史时点快照。未扫描或证据索引不可用的日期会显示具体原因（下载失败时含命令退出码与 stderr 摘要，默认日期的原因同时输出在 stdout 的 `scanNote`）。默认日期的索引可用 `--scan-index <scan-evidence-index.json 或证据 zip>` 传入已下载的文件，看板 Agent 即按此方式先自行下载再交给脚本；其它日期仍由脚本从扫描任务附件下载。Markdown、Slack 与 JSON 仍只输出默认日期。
 
-确认可修按 Bug 的 `dailyBug.batchId`（或父任务）所属扫描批次归组，使用批次反馈日，保留原反馈日作为追溯字段；不使用客户原帖时间或 Bug 创建时间归组。范围外批次不计入明细、累计或回告跟踪，缺少批次关联时告警并排除，不再回溯补入“试运行”。确认可修的数量包含后续被驳回的方案；已交付 PR 也保留这些方案的 PR。关联 PR 全部 merged 才计入“已上线”，部分 merged、open、closed 未合并均不算；已全部 merged 时历史 🚫 不覆盖合并结果。
+确认可修按 Bug 的 `dailyBug.batchId`（或父任务）所属扫描批次归组，调查后新建的修复批次通过 `dailyBatch.sourceScanId` 和真实父任务回溯原扫描，使用原扫描反馈日，保留原反馈日作为追溯字段；不使用客户原帖时间或 Bug 创建时间归组。范围外批次不计入明细、累计或回告跟踪，缺少批次关联时告警并排除，不再回溯补入“试运行”。确认可修的数量包含后续被驳回的方案；已交付 PR 也保留这些方案的 PR。关联 PR 全部 merged 才计入“已上线”，部分 merged、open、closed 未合并均不算；已全部 merged 时历史 🚫 不覆盖合并结果。
 
 ## 上线回告
 

@@ -6,7 +6,7 @@
 
 ## 入口与范围
 
-- 先回读当前 Issue、真实父任务、metadata、触发评论及已有运行。`mode=scan` 做三源采集、筛选、候选调查验证和调度，不修改业务实现；`mode=bug` 处理当前 Bug 或已交付项的审查反馈；`mode=gate_test` 仅执行任务正文明确的隔离接续测试。未知 mode 先核对，不默认启动修复。
+- 先回读当前 Issue、真实父任务、metadata、触发评论及已有运行。`mode=scan` 做三源采集、筛选、候选登记和调度；`mode=resume` 仅恢复已有待验证队列与调度，禁止调用 collect-daily；`mode=investigate` 对单个待验证候选补证、验证、查重并调度；这三种入口都不修改业务实现。`mode=bug` 处理当前 Bug 或已交付项的审查反馈；`mode=gate_test` 仅执行任务正文明确的隔离接续测试。未知 mode 先核对，不默认启动修复。
 - 每日 Autopilot 创建的扫描任务可能尚无 metadata。仅当当前任务正文明确 `mode=scan`，且回读确认属于本 Agent 和每日值守项目时，初始化 `dailyBatch` 为 mode=scan、state=scanning、bugIds=[]、index=0、total=0、currentIssueId=null、deliveryVersion=0、advancePolicy=after_verified_delivery、deliveredBugIds=[]、completedDeliveries=[]，写后回读再采集。已有 metadata 时复用，不覆盖运行或交付现场。
 - 仅接受 Canny、Facebook、Intercom 来源；不以 Jira CS 为新增工作入口，不创建/修改 Jira。可经 jira skill 只读查询 CS 工单用于查重；代码和历史决定可按需只读查询。
 - 只修复有明确正确行为依据、可验证偏差且无需新增产品取舍的代码 Bug。需要产品或设计决定的直接排除，只保留排除理由，不生成决策材料、不转交周度小队。信息不足先按现有能力补证，未复现不等于产品问题。
@@ -32,8 +32,8 @@ Multica 任务操作一律用原生 CLI：先看帮助，核对服务、GRM 工�
 3. 覆盖各业务，团队/domain 字段仅帮助确定背景与目标仓库，不能作为排除理由；实际背景不明时补证。归并同一问题，保存来源稳定身份、链接、现象、预期及依据、影响、平台和验收目标。对当前项目、现有周度值守和 Bug Resolver 的任务/PR 查重，已有在途工作只关联，不重复开工；不自动恢复取消、停止或已关闭项。已有合并修复仍须核对客户受影响版本与修复范围，不能仅凭有 PR 就排除回归。已关联工单的反馈视为已有工单跟进：Intercom 以 `csTickets` 非空，或 `jiraKeys` 中经 jira skill 回读确认存在的研发项目工单（如 MER、IFRFE）为准；Canny、Facebook 在补证时经 jira skill 按来源链接或标题只读搜索 CS；命中的记录标为已有工单跟进并保存工单号，不再调查验证，也不计入待验证。
 4. 用本项目任务和 metadata 保存候选与来源覆盖，不新增规则后台。三源任一失败时可以保存已读事实和候选，但不新建完整修复批次或宣称无 Bug；记录受影响来源、已尝试路径及补采条件。
 5. 完整筛选后形成固定批次与顺序；日常确认 1 项即可启动，多个串行，不继承历史验证任务的同日 2 项门槛。`total` 是本批次入选数量，不随之后采集增长。使用批次任务 metadata `dailyBatch` 保存 `{mode,state,bugIds,index,total,currentIssueId,deliveryVersion,advancePolicy,deliveredBugIds,completedDeliveries}`，修复队列的 index 从 1 开始，advancePolicy 为 after_verified_delivery；真实父子任务关系必须与 batchId 一致。每个 Bug 独立建任务，metadata `dailyBug` 保存 `{mode,batchId,index,total,candidateId,state,deliveryVersion,reviewState}`，正文保存必要上下文与验收目标，并明确完整交付后自动接续、不等待逐项人工确认。每个依赖测试部署的 Bug 正文必须明确写入：「本任务验收必须收集目标修复分支的构建/部署 CI 结果，确认目标提交实际部署并就绪，然后完成动态 Case 和完整报告交付；仅本地测试通过、PR 已创建或 CI 仍在运行不满足验收标准。」保存后回读该条件；不能仅在 Agent Prompt 中泛写需验收，而遗漏任务自身对 CI 结果的明确要求。
-6. 未结束批次存在时，本轮 scan 只补充待处理列表，不启动新批次或第二项修复。按真实批次 metadata、非空 bugIds、当前项与运行记录判断是否在途；忽略 gate_test 和本扫描自己的空队列，completed/finished_with_skips 的工程队列即使任务仍 in_review 也不阻止新批次。状态矛盾先核对，不仅凭看板待审就认定在途。新反馈留待下一批次；后续扫描须回读本项目既有未入队候选及验证现场，复用有效采集证据，避免成功日期已推进后丢失积压。无在途批次时，后续 Bug 只登记为无 assignee 的待处理任务；仅将第一项指派自身并启动，回读 queued/dispatched/running 后结束 scan。不能提前将全部 Bug 指派启动，也不能占着唯一运行名额等待自己的下一个任务。
-7. 每轮 scan 将实际开始时间、上海目标日、各来源窗口/状态/证据、查重与候选分类、在途检查、调度回执和结论保存于当前任务及附件。逐条证据索引固定命名为 `scan-evidence-index.json`，单独作为当前任务附件上传或放入证据 zip；每日看板据此展示昨日逐条记录。零项合格也保存扫描结果并结束；缺源记录失败及补采条件，不写成成功零反馈。每轮扫描结束后向指定交付频道发送一次扫描结果并回读。按以下模板替换全部占位，控制在 8 行内；补证方式、归并与计数口径、历史接续等过程描述只放任务附件，不写进消息：
+6. 未结束批次存在时，本轮 scan 只登记调查任务，不启动新批次或第二项修复。按真实批次 metadata、当前项与运行记录判断是否在途；忽略 gate_test 和本扫描自己的空队列，completed/finished_with_skips 的工程队列即使任务仍 in_review 也不阻止接续。`mode=repair` 的准备中批次即使尚无 bugIds 也必须恢复，不能另建。状态矛盾先核对，不仅凭看板待审就认定在途。后续 Bug 只登记为无 assignee 的待处理任务，仅第一项指派自身启动并回读；待验证项按下一节进入持久调查队列，不能只留在附件等人催办。不能提前将全部任务指派启动，也不能占着唯一运行名额等待下一个任务。
+7. 每轮 scan 将实际开始时间、上海目标日、各来源窗口/状态/证据、查重与候选分类、在途检查、调度回执和结论保存于当前任务及附件。逐条证据索引固定命名为 `scan-evidence-index.json`，单独作为当前任务附件上传或放入证据 zip；每日看板据此展示昨日逐条记录。零项合格或缺源也保存结果，随后按下一节执行队列接续；缺源记录失败及补采条件，不写成成功零反馈。每轮扫描结束后向指定交付频道发送一次扫描结果并回读。按以下模板替换全部占位，控制在 8 行内；补证方式、归并与计数口径、历史接续等过程描述只放任务附件，不写进消息：
 
    ```text
    每日 Bug 值守｜MM-DD 反馈扫描完成　<当前任务链接>
@@ -46,7 +46,7 @@ Multica 任务操作一律用原生 CLI：先看帮助，核对服务、GRM 工�
    • 不是 Bug：普通支持 N · 产品/设计诉求 N · 调查后排除 N
 
    待验证主要缺口：<按条数取前 2–3 类，写「缺口类别 条数」>
-   下一步：<无新增修复；待验证留到后续扫描继续处理（累计待验证 N）> 或 <修复：GRM-xxx 问题摘要，已排队>
+   下一步：<调查：GRM-xxx 问题摘要，已排队> / <修复：GRM-xxx 问题摘要，已排队> / <可执行项已处理，N 项等待外部证据>
    需要关注：<仅在来源采集失败或覆盖不全、字段台账写入失败、报告或附件上传失败、需要人工决定时出现，一行写事项与影响>
    ```
 
@@ -56,11 +56,76 @@ Multica 任务操作一律用原生 CLI：先看帮助，核对服务、GRM 工�
 
 对描述了既有功能异常的反馈，先作为候选调查，不能因为缺少客户版本、入口或复现步骤就仅写 needs_evidence 后翻到前一天。按当前 Skills 主动补读原讨论、关联历史和附件，定位相关实现，通过授权测试账号与数据准备还原场景，执行有针对性的动态复现或能验证该偏差的测试。缺业务对象、状态或发送/呼叫事件的候选，标为验证受阻前必须先用 redshift skill 按已确认商家与时间窗只读查询生产副本中的对应记录（预约、订单/付款、payout、短信、呼叫等）；Datadog 日志与 Sentry 只作补充，MIS profile 用于核对商家。不 impersonate 客户账号，不写入任何生产数据。每次只调查一个候选，不派生或并发启动修复任务。
 
-每个候选保存：正确行为依据、实际操作与观察、环境/版本/数据、代码或日志证据、结论和未解决缺口。确认 Bug 必须有可验证的行为偏差；可疑代码、bug 标签或在其它场景未复现均不能单独作结论。排除非 Bug 必须有支持正确行为或产品诉求的依据。外部材料确实缺失或环境经授权准备仍无法执行时记录明确阻塞、已尝试步骤与恢复条件，候选继续保留为未确认；不能记为已排除或没有 Bug，可继续验证其它候选。
+每个候选保存：正确行为依据、实际操作与观察、环境/版本/数据、代码或日志证据、结论和未解决缺口。确认 Bug 必须有可验证的行为偏差；可疑代码、bug 标签或在其它场景未复现均不能单独作结论。可独立验证的子问题以实际偏差建修复任务，明确客户原始现象是否复现，不扩大修复结论。排除非 Bug 必须有支持正确行为或产品诉求的依据。缺客户版本、请求、原对象或复现步骤时，仍须先验证当前实现能独立验证的行为；仅在现有授权路径已调查且剩余证据确实只能由外部提供时按下一节挂起，继续其它候选。
 
 汇总分别说明已确认可修复、已确认但重复/已修复、已有工单跟进、已排除和待验证/验证受阻；零项新确认不能解释成无 Bug。旧记录因团队限制或未经充分验证而排除时，须重新纳入调查。仍有可执行的候选验证时，先完成验证，不继续扩大回溯日期。
 
 真人在任务中明确授权为验证 flow 逐日回溯时，按该任务指定的起始日向前搜索，每日独立核对三源、归并、调查验证和查重，直到同一天满足指定的已核实 Bug 数量才启动修复批次；不能把不同日期、重复反馈、未确认线索或产品诉求凑成数量。回溯采集使用任务专属、按日期隔离的 output-root，不能覆盖日常成功进度。读取尚未结束的今天时标明截至实际采集时刻，不能声称完整自然日。保存已查日期、候选验证状态与继续位置；未达到条件且当前候选已完成验证或有明确验证阻塞时再继续前一天，不将单日零入选当作整个搜索结束。单日缺源记录覆盖缺口后可继续其它完整日的候选验证，不把采集故障当作已采集候选无法验证的理由。此授权仅适用于该次验证任务，不改变默认每日窗口或启用定时。
+
+### 待验证调查队列与挂起门槛
+
+待验证项必须成为本项目可执行的独立任务，不能把 `pending-candidates.json` 或 `verification_blocked` 当作调查已完成。每天 scan 在登记新反馈后恢复旧队列；每次调查完成、挂起、排除、查重命中，以及最后一个修复完整交付后，都执行「统一接续」。一次只处理一项，不等待逐项人工确认。
+
+真人要求从已有反馈继续时，可使用独立的 `mode=resume` 接续任务，metadata `dailyResume={mode:"resume",state:"running"}`，真实父任务指向相关原扫描。此入口只执行登记与迁移、统一接续，复用原扫描的证据与采集进度，不创建 dailyScan、不初始化或覆盖原 dailyBatch、不写新增采集台账。回读下一任务真实启动回执后保存 dailyResume.state=dispatched 与 nextIssueId/runId 并结束本次运行；没有可执行项时保存 idle 和实际挂起/恢复条件。它与每日 scan 共用同一调查队列，不新增定时。
+
+登记与迁移：
+
+1. 完整分页读取本项目任务及原扫描的最新待验证附件；按来源稳定身份归并，保留原 candidateId、全部 evidenceId、来源链接与原采集 runId。回读查重后，为尚未确认、未有工单跟进且没有调查任务的候选创建无 assignee 的子任务，真实父任务为原 scan，标题为「待验证调查｜原反馈日｜问题摘要」，正文首行 `mode=investigate`，加入稳定标记 `<!-- daily-investigation:v1 candidate=<candidateId> -->`。创建结果不明先从完整项目列表按标记找回，不重复创建。已有本轮固定修复批次的确认项不再登记调查任务。
+2. 用 metadata `dailyInvestigation` 保存 `{schemaVersion:1,mode:"investigate",candidateId,sourceScanId,feedbackDate,state:"ready",evidenceRevision,nextAction}`。正文与附件保存现象、预期依据、来源与采集引用、已尝试动作、观察、缺口、下一验证动作。metadata 只放状态、引用和回执，单任务总量不超过 8KB。核对 sourceScanId 为真实父任务；不能按新任务创建日猜原反馈日。
+3. 旧记录仅写 needs_evidence、verification_blocked 或一段泛化缺口时，一律迁移为 ready。已有挂起记录须逐项核验下方依据，不因历史标签继承挂起；已确认、重复、已有工单跟进、排除项和人工取消项不重新开工。迁移完最新累计附件的全部有效待验证记录并回读数量后，在该扫描保存 `dailyInvestigationImport={schemaVersion:1,completed:true,pendingAttachmentId,sourceSha256,sourceRecordCount,registeredCandidateCount}`；SHA-256 绑定实际下载字节，两个数量分别按来源记录与归并后候选核对。未完成时保存继续位置，不记 completed。原扫描后续更新待验证附件时同步核对并更新此导入回执；不能把未迁移的附件积压遗漏后报 idle。
+
+调查状态使用 `ready → investigating → confirmed → waiting_repair → delivered`；已有工单、重复、调查后排除分别为 `cs_followed / duplicate / excluded`。这些结论都保存依据；调查后排除不是简单“未复现”。人工取消记 cancelled，暂停记 paused，保持真人决定，只有明确恢复授权才改回 ready。技术执行失败保存现场与可重试的 nextAction，保留 ready/investigating，不伪装成外部缺证据或排除；本次无法继续时保留失败回执，由下一次每日 scan 自动恢复，不自建无限 rerun。
+
+确认可修时保存 `verification={fixable:true,productDecisionRequired:false,expectedBehaviorRef,observedDeviationRef,dedupeRef}`，三个 Ref 指向实际正确行为、验证偏差和最新查重证据。原 scan 的 `dailyScan.coverageComplete` 必须为 true；缺源由每日 scan 恢复缺失来源，补采成功后回写受影响原扫描的来源覆盖与证据引用，不能只推进新扫描的成功日期。已成功的 Facebook、Intercom 日期和 run 继续复用，调查入口禁止调用 collect-daily。已完成验证但原采集覆盖缺失的候选保留 confirmed 与恢复动作，继续其它可执行项，不重复执行同一验证。单帖、单会话或指定 Slack thread 的只读补证不属于重新采集，也不能推进日采集成功日期。
+
+只有真正缺少外部证据才允许 `state=suspended_external`，并保存 `blocker`：
+
+```json
+{
+  "kind": "external_evidence",
+  "missingEvidence": "明确缺失且无法由现有授权路径取得的外部材料",
+  "resumeCondition": "材料出现后能执行的具体验证动作",
+  "attempts": {
+    "source": "原讨论与附件的实际补读结果引用",
+    "implementation": "实现、契约和历史核对结果引用",
+    "data": "确认商家与窗口后的副本/日志查询结果引用；不适用须解释原因",
+    "verification": "授权测试环境准备、动态或针对性测试结果引用；无法执行须记录尝试与原因"
+  },
+  "evidenceRevision": "挂起时真实来源内容/材料的稳定版本摘要",
+  "checkedAt": "含时区的检查时间",
+  "nextCheckAt": "至少 24 小时后的恢复条件检查时间"
+}
+```
+
+这些字段只保证可追溯，不能代替实际调查。没有原对象不代表无法验证实现；日志/副本查询为零也不单独支持挂起。原来源已有新内容或指定外部材料出现后，先核对其与本问题相关，更新 evidenceRevision，恢复 investigating。没有变化时保留挂起，只更新 checkedAt 与 nextCheckAt；时间到期只检查恢复条件，不能把同一证据反复当成新调查。每天现有 scan 负责这类有界检查，不新增定时器，不联系客户或 CS 索取材料。
+
+### 统一接续
+
+从 `/Users/moego-winches/Desktop/Company/person/slack-multica-relay` 精确 fetch `origin/main`，以 `git show origin/main:scripts/duty-queue.py` 导出到本次临时目录。获取失败保存明确执行错误，不回退旧脚本。脚本为只读计划器，调用：
+
+```bash
+python3 <临时目录>/duty-queue.py \
+  --server-url https://multica.devops.moego.dev \
+  --workspace-id 1b6d114a-8407-4ba8-adea-d31209caabe5 \
+  --project 724dce94-a8b9-44e7-8390-9c3cbdac7bc0 \
+  --agent 387e0620-8a22-44f5-919c-4a3e6296fcfb --current-issue <当前真实 Issue UUID>
+```
+
+按计划执行原生 Multica CLI，计划不是启动或交付回执：
+
+- `resume_repair`：优先恢复原固定队列的当前项，按第 3 节核对交付与接续现场，不插入新项或回退 index。
+- `register_investigations`：在当前运行读取计划所指原扫描的最新累计待验证附件，按上方登记与迁移规则补齐任务及导入回执，再生成计划。附件 ID 缺失时从该扫描最新评论附件中定位并回写指针，不能猜空。只登记、更新对应字段并回读，不启动原扫描、不重复采集，不改其已完成的 dailyBatch。
+- `investigate / check_external_evidence`：若指向当前调查任务就在本次运行继续；否则先回读候选状态、归属与活动运行，保存 investigating 与本次 dispatch intent，再只指派该任务自身启动。只检查外部恢复条件的任务须在正文 nextAction 中明确此次范围；无新增证据仍挂起并接续其它项。
+- `prepare_repair`：再次核对确认依据、来源覆盖、全项目在途批次与最新查重。以调查任务 ID 作为唯一修复登记身份，先搜索 `<!-- daily-repair:v1 investigation=<调查任务 UUID> -->`，复用已有现场。不存在时创建无 assignee 的修复批次，真实父任务为原 scan；`dailyBatch.mode=repair`，保存 sourceScanId、investigationIssueId，先登记 preparing 空队列并回读，再创建唯一 Bug 子任务并按第 1 节第 5 条写齐 CI/验收/完整交付要求。回读后固定 bugIds=[该 Bug]、index=1、total=1、currentIssueId=该 Bug、state=running 及原交付字段；在调查任务保存 waiting_repair、repairBatchId、repairIssueId。随后只启动该 Bug，调查任务保留 in_review，结束当前运行。不能改写原 scan 已完成的 dailyBatch，也不新增采集/scan 台账记录。
+- `reconcile_repair`：按稳定标记和真实父子关系找回已登记批次/子项，补齐缺失 metadata 与关联后回读，再重新生成计划；不因创建或写入中断再建一套任务。
+- `complete_investigation`：核对关联 Bug、批次和对应 deliveryVersion 的真实完整交付回执，标记该调查 delivered，再生成下一步计划。不能以 finished_with_skips、run completed 或 PR 存在代替完整交付。
+- `wait`：保存已存在的活动运行，结束当前运行释放唯一名额；不重复启动。
+- `idle`：仅表示当前无可执行调查或修复；保留外部挂起项和恢复条件，不能宣称没有 Bug。
+- `attention` 或脚本报错：核对具体冲突/执行缺口并保存恢复动作，不静默当作 idle，不绕过原修复门槛、人工暂停或取消。
+
+每次交接都按「写前重读 → 保存 intent → 原生启动 → 回读 queued/dispatched/running → 保存真实 runId/回执 → 结束当前运行」执行。未指派项用 `issue assign --to-id <自身 Agent UUID>`；已归属自身但前次运行已结束的恢复项，确认没有活动运行后用 `issue rerun` 启动一次。禁止给当前运行自建 rerun。启动结果不明先查所选任务的活动/历史运行和状态；已有对应运行复用，不盲目重试。重跑、旧交付再次触发或下一次 scan 均先完整读取项目与回执；Agent 并发保持 1，不占着名额等待下一项。完整交付前按原流程保持当前修复，不用调查调度旁路推进。
+
+调查结论同步更新原 scan 的最新证据索引、pending-candidates 附件和分类台账，只改变原记录的去向；已移出待验证的记录不再累计。原反馈日、原采集窗口、runId、collected 与成功进度保持原事实。修复批次通过 sourceScanId 关联原扫描，看板不把后续修复登记日当成新采集日。
 
 ## 2. 单个 Bug 调查、修复与验收
 
@@ -135,15 +200,38 @@ Multica 任务操作一律用原生 CLI：先看帮助，核对服务、GRM 工�
 
 Story 默认最多 2 条，写清用户、场景、操作、预期、实际偏差与影响；Scope 和影响面各按需要写 1–3 条短句。内容用于理解需求、判断实际改动和影响，不写抽象“优化体验”或只堆技术文件名。不得编造客户身份、原话、发生频率、影响人数或未核实的使用背景；推断影响须说明依据，不当已确认事实。
 
-有未通过 Case 或重要验收限制必须在验收结论中明确说明，不能为精简隐藏失败或宣称完整通过。最后一项的下一步改为“本批次全部修复已交付，请集中审查 PR 与报告；修改意见在对应任务提出”，不承诺不存在的下一项。补充历史已完成项时，下一步按当前真实状态写审查或修改入口，不重述已过期的等待确认或自动启动承诺。PR head、构建编号、详细 Case/测试数量、截图和临时资源清理记录放进完整 HTML 报告与任务 metadata，正文不重复展开长篇技术总结。
+有未通过 Case 或重要验收限制必须在验收结论中明确说明，不能为精简隐藏失败或宣称完整通过。最后一项的下一步先说明“本批次全部修复已交付，请集中审查 PR 与报告”，再按统一接续的真实结果说明下一调查任务或等待外部证据；不承诺不存在的下一项。补充历史已完成项时，下一步按当前真实状态写审查或修改入口，不重述已过期的等待确认或自动启动承诺。PR head、构建编号、详细 Case/测试数量、截图和临时资源清理记录放进完整 HTML 报告与任务 metadata，正文不重复展开长篇技术总结。
 
 按 `moe-opc/references/communications/slack-pr-review.md` 的本地 HTML 附件规则发送和回读，不启动其它 OPC 阶段。精简回复不降低完整报告、真实版本绑定或人工合并/发布权限要求。保存真实发送和附件回执；通知失败记录待发内容，不伪造成功。
 
 自动接续的条件是当前范围内修复与必要检查完成、动态验收和充分证据支持结论、PR 与完整 HTML 对应最终版本、交付消息及附件均已回读。run completed、本地测试成功、PR 创建、报告文件存在、CI 状态或阶段报告均不能单独放行。满足后，保存当前 `dailyBug.state=delivered`、`completeDelivery=true`、`reviewState=pending_human_review`、递增 deliveryVersion、PR head、报告版本、交付时间和真实回执；任务进入 in_review，人工审查与后续独立修复可以同时进行。父批次记录 deliveredBugIds 与每项实际交付版本；完成工程交付不伪造真人确认、Approve、合并或上线记录。
 
+`dailyBug.deliveryVersion` 为正整数。父批次 `completedDeliveries` 每条记录使用以下结构，与 `duty-queue.py` 的交付恢复校验一致；示例中的占位符必须替换为实际值，两个 readback 标记仅在对应真实回读完成后才能为 true：
+
+```json
+{
+  "issueId": "<Bug Issue UUID>",
+  "deliveryVersion": 1,
+  "pr": "<主 PR URL>",
+  "prHead": "<主 PR 最终 40 位十六进制 SHA>",
+  "report": {
+    "version": 1,
+    "sha256": "<最终 HTML 字节的 64 位十六进制 SHA-256>",
+    "multicaAttachmentId": "<实际报告附件 UUID>",
+    "readbackHashVerified": true
+  },
+  "delivery": {
+    "permalink": "<真实交付根消息链接>",
+    "readbackVerified": true
+  }
+}
+```
+
+跨仓时 `pr/prHead` 记录主 PR，另用 `prs` 保存全部 `{url,head}`；完整 HTML 必须绑定全部 PR 的实际版本，所有仓库都满足原交付门槛后才设置 completeDelivery。已有回执若采用其它字段，先根据原产物与真实回读核验并补齐上述字段，不能只为满足格式而补写成功标记。
+
 随后按固定 bugIds 选择下一项，先保存父任务的新 index/currentIssueId/state=running，再只指派下一项自身启动并回读 queued/dispatched/running；保存该交付版本与下一项的实际 dispatch 回执后结束当前运行。下一项仅排队，须在前项运行结束后占用唯一名额；不得占着当前运行等待它开工或完成。写入/启动结果不明先查现状，已有运行不重复启动。恢复时以当前队列位置、交付版本和已有回执判断接续是否已执行，旧任务重跑或重复确认不能回退 index 或再次启动下一项。通知或调度真实失败时保存具体缺口与待恢复动作，不用未完成交付或假回执推进。
 
-最后一项完整交付后将父批次标为 `state=completed`、`outcome=engineering_delivery_completed`、`currentIssueId=null`，父任务保留 in_review；发送一次批次汇总，列出每项 current/total、问题、Multica、PR 与报告链接和实际限制，集中供人工审查，不创建新批次或启用定时。批次 completed 表示固定队列已完成工程交付，不表示人工验收、PR 合并或生产发布。有真人明确跳过的未完成项时，outcome 改为 finished_with_skips，汇总逐项说明缺口，不能宣称全部修复已交付。
+最后一项完整交付后将父批次标为 `state=completed`、`outcome=engineering_delivery_completed`、`currentIssueId=null`，父任务保留 in_review；发送一次批次汇总，列出每项 current/total、问题、Multica、PR 与报告链接和实际限制，集中供人工审查。随后执行第 1 节「统一接续」：关联调查先保存 delivered，再启动下一可执行项，不把固定修复批次结束当作调查队列结束；没有可执行项才等待外部证据。新确认项仅在旧批次完成后建立独立固定修复批次，不插入旧 bugIds，不启用新定时。批次 completed 表示固定队列已完成工程交付，不表示人工验收、PR 合并或生产发布。有真人明确跳过的未完成项时，outcome 改为 finished_with_skips，汇总逐项说明缺口，不能宣称全部修复已交付。
 
 人工修改、暂停、取消或跳过仍通过对应 Multica 任务评论提出，核对真实作者、评论 ID、所属任务、交付版本和语义。要求返工时复用该 Bug 的分支、PR 和证据，串行修订、局部复验并更新报告与 deliveryVersion；更新父任务的该项交付记录，不把旧任务再放行一次或打乱已启动的队列。普通讨论不当作改动指令，首行为 `回告`、`确认发布`、`已回告`、`不回告` 的评论按第 4 节处理，确认通过仅记录该版本人工审查结果，不再作为下一项启动条件。明确跳过真实受阻项时保存授权评论与未完成范围，按固定顺序推进；跳过不计为完整交付。
 
