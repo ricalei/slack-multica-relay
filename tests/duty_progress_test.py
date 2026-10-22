@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from duty_queue_test import candidate, freeze, issue, add_repair, deliver, suspended
+from duty_queue_test import candidate, freeze, issue, add_repair, deliver, suspended, block, receipt
 
 
 spec = importlib.util.spec_from_file_location('board_stages', Path(__file__).parents[1] / 'scripts/duty-board.py')
@@ -99,6 +99,25 @@ class ProgressTests(unittest.TestCase):
         self.assertIn('完整交付 0/1', str(board.progress_rows(result)))
         scan['metadata']['dailyBatch']['state'] = 'paused'
         self.assertIn('等待真人决定', snapshot(scan, issues + bugs)['nextAction'])
+
+    def test_notified_block_is_shown_while_queue_continues_and_after_it_ends(self):
+        rows = [candidate('first', 'waiting_repair'), candidate('second', 'waiting_repair')]
+        scan, issues = fixture(rows, complete=True)
+        bugs = add_repair(scan, rows)
+        for index, bug in enumerate(bugs, 4):
+            bug.update(identifier=f'GRM-{index}', title='修复｜问题摘要')
+        block(scan, bugs[0])
+        scan['metadata']['dailyBatch'].update(index=2, currentIssueId='bug-second', blockedBugIds=['bug-first'])
+        result = snapshot(scan, issues + bugs)
+        self.assertEqual((result['repair']['state'], result['repair']['completed'], result['repair']['blocked']),
+                         ('repairing', 0, 1))
+        self.assertIn('固定队列第 2/2 项 · 受阻 1 项待解除', str(board.progress_rows(result)))
+        scan['metadata']['dailyBatch'].update(
+            state='completed', outcome='finished_with_blocked', currentIssueId=None,
+            deliveredBugIds=['bug-second'], completedDeliveries=[receipt(bugs[1])])
+        result = snapshot(scan, issues + bugs)
+        self.assertEqual((result['repair']['state'], result['repair']['completed']), ('completed_with_blocked', 1))
+        self.assertIn('受阻项', result['nextAction'])
 
     def test_registration_mismatch_or_wrong_scope_cannot_be_successful_zero(self):
         for mutation in ('missing', 'scope', 'paused'):

@@ -77,6 +77,8 @@ def repair(scan, issues, investigated, members):
     confirmed = [row for row in members if queue.meta(row, 'dailyInvestigation')['state'] in queue.FIXABLE]
     bugs = queue.round_bugs(scan, confirmed, {row['id']: row for row in issues})
     complete = sum(queue.verified_delivery(batch, row) for row in bugs)
+    # 只统计已回读受阻通知的项；队列越过它们继续，受阻不计入完整交付。
+    blocked = sum(queue.verified_block(batch, row) for row in bugs)
     state = 'repairing'
     if batch.get('state') in {'blocked', 'paused', 'cancelled'}:
         state = batch['state']
@@ -84,7 +86,8 @@ def repair(scan, issues, investigated, members):
         final = queue.round_plan(scan, issues, {row['id']: row for row in issues}, scan.get('assignee_id'))
         if final['action'] != 'complete_round':
             raise queue.QueueError('修复完成标记缺少对应版本的完整交付回执')
-        state = 'completed_with_skips' if final.get('outcome') == 'finished_with_skips' else 'completed'
+        state = {'finished_with_skips': 'completed_with_skips',
+                 'finished_with_blocked': 'completed_with_blocked'}.get(final.get('outcome'), 'completed')
     current = batch.get('currentIssueId')
     if state == 'repairing' and (type(batch.get('index')) is not int
             or not 1 <= batch['index'] <= len(bugs) or current != bugs[batch['index'] - 1]['id']):
@@ -92,7 +95,7 @@ def repair(scan, issues, investigated, members):
     current_bug = next((row for row in bugs if row['id'] == current), None)
     blocker = (queue.meta(current_bug, 'dailyBug').get('blocker') or {}) if current_bug else {}
     waiting_authorization = (isinstance(blocker, dict) and blocker.get('kind') == 'authorization_required')
-    return {'state': state, 'completed': complete, 'total': len(bugs), 'index': batch.get('index'),
+    return {'state': state, 'completed': complete, 'blocked': blocked, 'total': len(bugs), 'index': batch.get('index'),
             'currentIssueId': current, 'waitingAuthorization': waiting_authorization}, bugs
 
 
@@ -148,6 +151,8 @@ def snapshot(scan, issues, runs, now, issue_url_base, scan_record=None):
         next_action = '本轮无新增可修项，保留完整调查结论'
     elif fix['state'] in {'completed', 'completed_with_skips'}:
         next_action = '工程处理已结束，按既有流程审查 PR 与交付报告'
+    elif fix['state'] == 'completed_with_blocked':
+        next_action = '固定队列已结束；受阻项按 Slack 受阻通知处理后，在原任务补完验收与交付'
     elif fix['state'] == 'repairing':
         next_action = '当前项完整验收交付后，串行继续固定修复队列'
     else:

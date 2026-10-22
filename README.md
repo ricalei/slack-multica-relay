@@ -88,7 +88,7 @@ Cloudflare 使用 `pnpm dev:cf`、`pnpm build:cf` 和 `pnpm deploy:cf`，共享�
 
 每轮扫描用 `dailyRound` 冻结疑似 Bug 的数量和 candidateId 集合摘要，清单与完整调查过程放真实附件；metadata 只保留状态和回执。每条候选登记为原扫描下的调查子任务，`dailyInvestigation.roundId` 与 sourceScanId 指向当前扫描。确认一项后继续调查下一项，不能提前开始修复。每条确认、排除、重复、已有工单或外部缺证结论都须有可回读的报告；未调查、技术失败和泛化缺口不算完成。
 
-全部候选有依据的结论与完整调查索引回读后，才能设置 investigationComplete；三源覆盖完整后才建立原扫描的固定 dailyBatch。Bug 子任务用 investigationIssueId 对应调查项，全部确认项登记并回读后固定 total、bugIds 和当前位置。同一个值守 Agent 沿用现有修复、CI、动态验收、最终 HTML、PR 与交付回读门槛逐项执行，完整交付后推进固定队列，最后结束本轮。
+全部候选有依据的结论与完整调查索引回读后，才能设置 investigationComplete；三源覆盖完整后才建立原扫描的固定 dailyBatch。Bug 子任务用 investigationIssueId 对应调查项，全部确认项登记并回读后固定 total、bugIds 和当前位置。同一个值守 Agent 沿用现有修复、CI、动态验收、最终 HTML、PR 与交付回读门槛逐项执行，完整交付后推进固定队列。需要真人或外部条件才能继续的受阻项先在交付频道发受阻结果并回读，记入 `blockedBugIds` 与 `blockNotices` 后接续下一项，真人解除后在原任务补完；固定队列走完即结束本轮，最后一项的消息兼作批次汇总。固定在 `701a730` 或 `06de955` 的旧轮次仍在受阻时停住，等待授权或跳过。
 
 真正外部缺证必须保留原来源、实现、数据与验证路径的实际尝试、缺失材料和恢复条件，作为已调查结论保存在任务、完整报告与分类台账；值守 Agent 的 Slack 汇总不单列这些内容或数量，也不另发通知。不能把尚未调查项留在候选附件后报告扫描完成。旧扫描、旧 pending-candidates 和历史待调查已停止，仅用于追溯、查重，不自动导入新轮次。停止不删除证据，不改写已有修复与交付结果。
 

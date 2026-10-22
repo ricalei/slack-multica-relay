@@ -26,8 +26,8 @@ schedulerRevision=<调度器提交 SHA>
 
 ## 修复与交付
 
-1. 新轮调查使用 dailyExecution 固定版本的 duty-dispatch.py（protocolVersion=1），采集、汇总与修复使用同版本 duty-queue.py（protocolVersion=2）。旧轮继续 701a7303acb6da9b4ce40e1838aafa0922b8a22a 串行规则，不迁移或重采。进入修复前并发必须已恢复为 1。只读计划不等于真实启动。按 Agent 的 collect_sources、register_round、investigate、finalize_round、prepare_round_repair、resume_repair、complete_round 等动作执行；任何矛盾先核对，不旁路全轮调查门槛。
+1. 新轮调查使用 dailyExecution 固定版本的 duty-dispatch.py（protocolVersion=1），采集、汇总与修复使用同版本 duty-queue.py（protocolVersion=2）。旧轮继续 701a7303acb6da9b4ce40e1838aafa0922b8a22a 串行规则，不迁移或重采。进入修复前并发必须已恢复为 1。只读计划不等于真实启动。按 Agent 的 collect_sources、register_round、investigate、finalize_round、prepare_round_repair、resume_repair、advance_after_block、complete_round 等动作执行；任何矛盾先核对，不旁路全轮调查门槛。
 2. 全轮调查完成、三源覆盖完整且无其它真实修复队列在途后，在原扫描登记唯一固定修复批次，仅纳入 confirmed 项。沿用值守 Agent 当前修复能力，每个 Bug 正文保留目标分支 CI、真实部署版本、动态 Case、最终完整 HTML、PR 和交付回读要求；不参考其它 Agent 的专属规则。
-3. 只将首项指派自身，回读真实 queued/dispatched/running 后结束当前运行释放唯一名额。每项完整交付后自动接下一修复，最后一项汇总供人工审查并结束本轮；不返回历史调查队列，不等待逐项人工确认。PR 合并和生产发布仍需明确授权。
+3. 只将首项指派自身，回读真实 queued/dispatched/running 后结束当前运行释放唯一名额。每项完整交付后，或真实受阻并按 Agent 模板在交付频道发出、回读受阻结果后，自动接下一修复；受阻项保留现场，待真人解除后在原任务补完。最后一项的消息写明本批次结果，不另发批次汇总，随后结束本轮；不返回历史调查队列，不等待逐项人工确认。PR 合并和生产发布仍需明确授权。
 4. 三源缺失、调查未完成、报告缺口或执行失败必须保留现场和具体恢复动作，不能伪造完成或无 Bug。零项合格也须有完整调查与分类证据。保存来源覆盖、scan-evidence-index.json、完整调查索引、真实交接和交付回执。
 5. 全轮调查完成后，按 Agent 模板向指定频道 <交付频道 ID> 发送一次扫描结果并回读；明确调查完成数、确认可修数及下一步。外部缺证的过程、数量、材料缺口和恢复条件保留在任务、完整报告与分类台账，不在值守 Agent 的 Slack 汇总中单列，也不另发通知。尚在调查时只报告实际阶段，不发完成通知；重跑复用回执，避免重复发送。

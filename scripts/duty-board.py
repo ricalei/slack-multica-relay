@@ -36,7 +36,7 @@ FOLLOW_UP_FIELDS = {'intercom': ('judgedThrough', 'csInformedAt', 'csInformedPar
                     'canny': ('judgedThrough', 'baselineScore', 'respondedCommentId')}
 STATE_LABELS = {
     'rejected': '⛔ 不上线', 'released': '🟢 已上线',
-    'review': '⚪ 待审', 'pr_closed': '⚠️ PR 已关闭未合并', 'fixing': '🔧 修复中',
+    'review': '⚪ 待审', 'pr_closed': '⚠️ PR 已关闭未合并', 'fixing': '🔧 修复中', 'blocked': '🚧 受阻',
 }
 
 
@@ -156,12 +156,15 @@ def follow_up(source, notify, record, read, now):
     return {'state': 'responded', 'respondedAt': responded, 'proposal': {**record, 'respondedAt': responded}}
 
 
-def bug_state(prs, rejected):
+def bug_state(prs, rejected, blocked=False):
     # 上线按关联 PR 全部 merged 判断；历史驳回标记不覆盖实际合并结果。
     if prs and all(pr['state'] == 'merged' for pr in prs):
         return 'released'
     if rejected:
         return 'rejected'
+    # 修复受阻时队列已越过该项，单独列出提示真人解除，不混在修复中或待审里。
+    if blocked:
+        return 'blocked'
     if not prs:
         return 'fixing'
     if any(pr['state'] == 'closed' for pr in prs):
@@ -304,7 +307,8 @@ def notify_label(bug, now):
 
 
 def attention(board, now):
-    items = {'notify': [], 'responded': [], 'review': [], 'pr_closed': [], 'unrejectable': [], 'fixing': []}
+    items = {'notify': [], 'responded': [], 'review': [], 'pr_closed': [], 'unrejectable': [], 'fixing': [],
+             'blocked': []}
     for bug in board['bugs']:
         state = bug['state']
         follow = bug.get('followUp') or {}
@@ -315,16 +319,18 @@ def attention(board, now):
         elif state == 'review':
             created = min((pr['createdAt'] for pr in bug['prs'] if pr['state'] == 'open'), default=None)
             items['review'].append((bug, _age(created, now)))
-        elif state in ('pr_closed', 'fixing'):
+        elif state in ('pr_closed', 'fixing', 'blocked'):
             items[state].append((bug, None))
-        if not bug.get('deliveryPermalink') and state != 'rejected':
+        # 只提醒已有 PR 或已交付却缺交付链接的真实台账缺口；排队、修复中尚未发消息属正常。
+        if (not bug.get('deliveryPermalink') and state != 'rejected'
+                and (bug.get('prs') or bug.get('delivered'))):
             items['unrejectable'].append((bug, None))
     return items
 
 
 ATTENTION_TITLES = {
     'notify': '已上线待回告', 'responded': '已回告有新回应', 'review': '待审 PR', 'pr_closed': 'PR 已关闭未合并且未标 🚫',
-    'fixing': '已确认尚无 PR', 'unrejectable': '无交付消息，无法用 🚫 标注',
+    'fixing': '已确认尚无 PR', 'unrejectable': '无交付消息，无法用 🚫 标注', 'blocked': '修复受阻待解除',
 }
 
 
@@ -371,7 +377,8 @@ def progress_rows(progress):
     else:
         inv_text = {'registering': '本轮清单登记中', 'legacy': '历史记录未保存逐条调查进度',
                     'attention': '证据或清单待核对，完成数未知'}[inv['state']]
-    if fix['state'] in {'repairing', 'completed', 'completed_with_skips', 'blocked', 'paused', 'cancelled'}:
+    if fix['state'] in {'repairing', 'completed', 'completed_with_skips', 'completed_with_blocked',
+                        'blocked', 'paused', 'cancelled'}:
         fix_text = f"完整交付 {fix['completed']}/{fix['total']}"
         if fix['state'] == 'repairing':
             fix_text += f" · 固定队列第 {fix.get('index')}/{fix['total']} 项"
@@ -379,8 +386,12 @@ def progress_rows(progress):
             fix_text += ' · 已结束，含真人授权跳过项'
         elif fix['state'] == 'completed':
             fix_text += ' · 工程交付已结束'
+        elif fix['state'] == 'completed_with_blocked':
+            fix_text += ' · 固定队列已结束'
         else:
             fix_text += ' · ' + {'blocked': '修复受阻，详见当前任务', 'paused': '已暂停', 'cancelled': '已取消'}[fix['state']]
+        if fix.get('blocked'):
+            fix_text += f" · 受阻 {fix['blocked']} 项待解除"
     else:
         fix_text = {'not_started': '尚未开始，等待全轮调查与汇总', 'preparing': '固定修复清单登记中',
                     'not_needed': '本轮无新增可修项', 'attention': '交付证据或暂停现场待核对'}[fix['state']]
@@ -437,7 +448,7 @@ def render_markdown(board, now):
 
 
 # Slack 版按状态分组；已上线、不上线会持续累积，只列前几个编号。
-STATUS_ORDER = ('released', 'review', 'pr_closed', 'fixing', 'rejected')
+STATUS_ORDER = ('released', 'review', 'pr_closed', 'fixing', 'blocked', 'rejected')
 STATUS_LIST_LIMIT = {'released': 5, 'rejected': 5}
 
 
@@ -673,16 +684,18 @@ def collect(args, now):
         if board is None:
             warnings.append(f"{issue['identifier']} 在字段台账中没有记录，未计入看板")
             continue
+        daily_bug = _meta(issue, 'dailyBug') or {}
         bug = {'identifier': issue['identifier'], 'url': args.issue_url_base + issue['identifier'],
                'summary': issue['title'].split('｜')[-1], 'feedbackDate': cohort['feedbackDate'], 'scanDate': cohort['scanDate'],
                'batch': cohort['batch'], 'sourceFeedbackDate': board.get('feedbackDate'),
-               'investigationIssueId': (_meta(issue, 'dailyBug') or {}).get('investigationIssueId'),
+               'investigationIssueId': daily_bug.get('investigationIssueId'),
                'source': board.get('source'), 'sourceUrl': board.get('sourceUrl'),
-               'deliveryPermalink': (board.get('delivery') or {}).get('permalink'), 'rejection': None, 'notify': None}
+               'deliveryPermalink': (board.get('delivery') or {}).get('permalink'), 'rejection': None, 'notify': None,
+               'delivered': daily_bug.get('completeDelivery') is True}
         bug['prs'] = [github.pr(url) for url in board.get('prs') or []]
         if bug['deliveryPermalink']:
             bug['rejection'] = rejection(slack_thread(args.slack_cli, bug['deliveryPermalink']), args.reviewer)
-        bug['state'] = bug_state(bug['prs'], bug['rejection'] is not None)
+        bug['state'] = bug_state(bug['prs'], bug['rejection'] is not None, daily_bug.get('state') == 'blocked')
         if bug['state'] == 'released':
             notify = ledger.get((issue['identifier'], 'notify'))
             bug['notify'] = notify_state(notify)
@@ -822,7 +835,7 @@ RECORD_GROUPS = (('需要关注', ('verification_blocked', 'confirmed', 'duplica
                  ('非 Bug', ('product_decision', 'non_bug')))
 DEFAULT_RECORD_STATE = 'verification_blocked'
 TODO_TAGS = {'notify': 'notify', 'responded': 'released', 'review': 'review',
-             'pr_closed': 'rejected', 'fixing': 'review', 'unrejectable': 'review'}
+             'pr_closed': 'rejected', 'fixing': 'review', 'unrejectable': 'review', 'blocked': 'notify'}
 
 
 def _bug_note(bug, now, ages):
