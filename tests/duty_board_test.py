@@ -302,6 +302,14 @@ class BoardTests(unittest.TestCase):
         self.assertEqual(items['review'][0][1], '2 天')
         self.assertEqual([entry[0]['identifier'] for entry in items['unrejectable']], ['B2'])
 
+    def test_missing_delivery_link_is_reported_only_after_pr_or_delivery(self):
+        queued = {**bug('Q1', '2026-10-13', 'fixing', []), 'deliveryPermalink': None}
+        delivered = {**bug('D1', '2026-10-13', 'fixing', []), 'deliveryPermalink': None, 'delivered': True}
+        with_pr = {**bug('P1', '2026-10-13', 'review'), 'deliveryPermalink': None}
+        board = board_module.build_board([], [queued, delivered, with_pr], dt.date(2026, 10, 13), dt.date(2026, 10, 14))
+        self.assertEqual([entry[0]['identifier'] for entry in board_module.attention(board, NOW)['unrejectable']],
+                         ['D1', 'P1'])
+
     def test_released_bugs_without_notify_record_need_notify(self):
         released = [pr('merged', release={'tag': 't'})]
         bugs = [{**bug(f'N{index}', '2026-10-13', 'released', released), 'notify': notify}

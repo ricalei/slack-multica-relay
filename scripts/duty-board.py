@@ -321,7 +321,9 @@ def attention(board, now):
             items['review'].append((bug, _age(created, now)))
         elif state in ('pr_closed', 'fixing', 'blocked'):
             items[state].append((bug, None))
-        if not bug.get('deliveryPermalink') and state != 'rejected':
+        # 只提醒已有 PR 或已交付却缺交付链接的真实台账缺口；排队、修复中尚未发消息属正常。
+        if (not bug.get('deliveryPermalink') and state != 'rejected'
+                and (bug.get('prs') or bug.get('delivered'))):
             items['unrejectable'].append((bug, None))
     return items
 
@@ -688,7 +690,8 @@ def collect(args, now):
                'batch': cohort['batch'], 'sourceFeedbackDate': board.get('feedbackDate'),
                'investigationIssueId': daily_bug.get('investigationIssueId'),
                'source': board.get('source'), 'sourceUrl': board.get('sourceUrl'),
-               'deliveryPermalink': (board.get('delivery') or {}).get('permalink'), 'rejection': None, 'notify': None}
+               'deliveryPermalink': (board.get('delivery') or {}).get('permalink'), 'rejection': None, 'notify': None,
+               'delivered': daily_bug.get('completeDelivery') is True}
         bug['prs'] = [github.pr(url) for url in board.get('prs') or []]
         if bug['deliveryPermalink']:
             bug['rejection'] = rejection(slack_thread(args.slack_cli, bug['deliveryPermalink']), args.reviewer)
