@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from duty_queue_test import candidate, freeze, issue, suspended
+from duty_queue_test import candidate, freeze, issue, record, suspended
 
 
 spec = importlib.util.spec_from_file_location('duty_dispatch', Path(__file__).parents[1] / 'scripts/duty-dispatch.py')
@@ -219,7 +219,7 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual((result['action'], native.starts), ('finalize_round_here', []))
 
     def test_last_worker_queues_a_successor_while_original_scan_is_exiting(self):
-        data = snapshot([candidate('last', 'excluded')])
+        data = snapshot([candidate('last', 'confirmed')])
         data['issues'][1]['assignee_id'] = 'agent'
         data['runs'].append(run('last'))
         native = FakeNative(data)
@@ -238,16 +238,27 @@ class DispatchTests(unittest.TestCase):
         finalizer = {**SCOPE, 'current_run': 'new-scan'}
         self.assertEqual(self.advance(native, finalizer)['action'], 'finalize_round_here')
         self.assertEqual(native.issue('scan')['metadata']['dailyDispatch']['finalizerRunId'], 'new-scan')
+        serial = dict(project_id='project', agent_id='agent', current_issue_id='scan')
+        self.assertEqual(dispatch.queue.next_action(data['issues'], data['runs'], **serial)['action'],
+                         'finalize_round')
+        data['issues'][0]['metadata']['dailyRound'].update(
+            state='ready_repair', investigationComplete=True, investigationIndex=record('index'))
+        self.assertEqual(dispatch.queue.next_action(data['issues'], data['runs'], **serial)['action'],
+                         'prepare_round_repair')
 
-    def test_scan_that_already_accepted_finalization_can_be_reused_by_last_worker(self):
+    def test_original_scan_with_draining_worker_queues_one_successor_and_exits(self):
         data = snapshot([candidate('last', 'excluded')])
         data['issues'][1]['assignee_id'] = 'agent'
         data['runs'].append(run('last'))
         native = FakeNative(data)
-        self.assertEqual(self.advance(native)['action'], 'finalize_round_here')
-        result = self.advance(native, {**SCOPE, 'current_issue': 'last', 'current_run': 'last-run'})
-        self.assertEqual(result['receipts'][0]['runId'], 'scan-run')
-        self.assertEqual(native.starts, [])
+        result = self.advance(native)
+        self.assertEqual((result['action'], native.starts), ('finalize_round', ['scan']))
+        self.assertEqual(result['receipts'][0]['runId'], 'new-scan')
+        self.assertNotIn('dailyDispatch', native.issue('scan')['metadata'])
+        self.assertEqual(self.advance(native)['action'], 'yield_to_finalizer')
+        worker = {**SCOPE, 'current_issue': 'last', 'current_run': 'last-run'}
+        self.advance(native, worker)
+        self.assertEqual(native.starts, ['scan'])
 
     def test_expired_or_incomplete_conclusions_are_reinvestigated(self):
         for row in (candidate('bug', 'confirmed'), suspended()):

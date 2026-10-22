@@ -107,8 +107,11 @@ def plan(snapshot, *, round_id, current_issue, current_run, agent_id, project_id
     if current_issue == round_id:
         if any(run['issue_id'] == round_id and run['id'] != current_run for run in active):
             return {'action': 'yield_to_finalizer', 'concurrency': 1}
-        return {'action': 'finalize_round_here', 'concurrency': 1, 'total': len(rows),
-                'completed': len(rows), 'remaining': 0}
+        if not any(run['issue_id'] in members for run in active):
+            return {'action': 'finalize_round_here', 'concurrency': 1, 'total': len(rows),
+                    'completed': len(rows), 'remaining': 0}
+        # 旧只读修复计划器看到其它活动 run 会让出。先排后继并退出，
+        # 让汇总真正等到全部调查 run 退出，避免已接管后又按 wait 结束而无人接续。
     return {'action': 'finalize_round', 'concurrency': 1, 'issueIds': [round_id],
             'total': len(rows), 'completed': len(rows), 'remaining': 0}
 
@@ -230,14 +233,13 @@ class Native:
         self.call(['issue', 'rerun', issue_id])
 
 
-def launch(native, journal, issue_id, agent_id, runtime_id, *, finalizer=False, accepted_run=None):
+def launch(native, journal, issue_id, agent_id, runtime_id, *, finalizer=False):
     """保存启动前 run 集合；超时后只认实际新 run，未知结果不能重复启动。"""
     history = native.history(issue_id)
     active = [run for run in history if run.get('status') in queue.IN_FLIGHT]
     if any(run.get('agent_id') != agent_id or run.get('runtime_id') != runtime_id for run in active):
         raise Error('目标任务存在其它执行者或 Runtime 的运行')
-    future = [run for run in active if run.get('status') in {'queued', 'dispatched'}
-              or run.get('id') == accepted_run]
+    future = [run for run in active if run.get('status') in {'queued', 'dispatched'}]
     if len(active) > 1 and not (finalizer and len(active) == 2 and len(future) == 1):
         raise Error('目标任务已有多个活动运行')
     intent = journal.data.get(issue_id)
@@ -262,7 +264,7 @@ def launch(native, journal, issue_id, agent_id, runtime_id, *, finalizer=False, 
     if row.get('assignee_id') is None:
         native.assign_without_start(issue_id)
     # 仅汇总可在旧 scan 仍执行时排一个后继。原生 rerun 保留 executing run，
-    # 后继受服务端同 issue 串行约束；复用未经接管确认的旧 run 会丢掉退出窗口内的请求。
+    # 后继受服务端同 issue 串行约束；复用旧 run 会丢掉退出窗口内的请求。
     intent = {'beforeRunIds': [run['id'] for run in native.history(issue_id)]}
     journal.data[issue_id] = intent
     journal.save()
@@ -304,9 +306,8 @@ def advance(native, journal, scope):
                 if issue_id not in journal.data:
                     native.metadata(issue_id, 'dailyInvestigation', {**item, 'state': 'investigating'})
             finalizer = result['action'] == 'finalize_round'
-            accepted = queue.meta(row, 'dailyDispatch').get('finalizerRunId') if finalizer else None
             receipts.append(launch(native, journal, issue_id, scope['agent_id'], scope['runtime_id'],
-                                   finalizer=finalizer, accepted_run=accepted))
+                                   finalizer=finalizer))
         except Error as error:
             errors.append({'issueId': issue_id, 'reason': str(error)})
     # 调查运行不会写这个共享字段；每次按完整事实重算，避免并发计数丢失。
