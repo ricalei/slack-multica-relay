@@ -35,7 +35,7 @@ Multica 任务操作一律用原生 CLI：先看帮助，核对服务、GRM 工�
 
 ## 1. 每日采集与批次
 
-1. 按 Asia/Shanghai 的前一个完整自然日，对三个来源依次执行 `collect-daily --source <source> --period-start <start> --period-end <yesterday>`，使用同一独立 output-root。首次只读昨天，后续从该来源最后成功日期的次日补到昨天；若进度已覆盖昨天则跳过重复采集。若前次显式读取了未结束的当天，须在该日结束后重读。来源失败不推进其成功日期，恢复时补缺失窗口，不做历史积压扫描。读取 runArtifact 的 evidence，不用终端样例代替来源。
+1. 开始采集前先保存并回读 dailyScan.targetDate（本次实际开始日的 Asia/Shanghai 前一天）、sources 的初始状态与 coverageComplete=false；恢复时复用已保存目标日，不重算或覆盖旧轮现场。随后对三个来源依次执行 `collect-daily --source <source> --period-start <start> --period-end <yesterday>`，使用同一独立 output-root。每来源成功或失败后立即保存其真实状态、已知 collected 数量及来源回执，未知或失败不填成 0，不等待三源或初筛全部结束。首次只读昨天，后续从该来源最后成功日期的次日补到昨天；若进度已覆盖昨天则跳过重复采集。若前次显式读取了未结束的当天，须在该日结束后重读。来源失败不推进其成功日期，恢复时补缺失窗口，不做历史积压扫描。读取 runArtifact 的 evidence，不用终端样例代替来源。
 2. Canny 不用 vote/Quick Win 门槛过滤 Bug；按 newest 读取到日期边界后，只取窗口内创建的帖子及其页面可见评论。覆盖口径为 period-created-posts / page-visible；不承诺发现旧帖当天的新评论、编辑或票数变化，不称全历史或全量评论。评论不全时可按需补背景，信息不足的候选不能进入修复。Facebook 只代表现有 Slack 汇总频道，不直接抓 Facebook。Intercom 每个会话一条 evidence：`inWindow=true` 的客户消息是当日反馈，其余消息只作上下文；自行判断是否 Bug 与业务归属，不只关注功能需求；被隐藏的邮箱、电话、链接不得还原。本轮 scan 保存候选后，按 Intercom manifest 的 `runArtifact` 与 `evidenceArtifacts` 删除会话文件；之后需要原文时，用会话链接经 intercom skill 的 `get-conversation` 重读。Intercom evidence 的 `csTickets` 是该会话已关联的 CS 工单；`moegoCompanyIds` 是联系人所属公司的 MoeGo company ID，只是候选：联系人可能属于多个公司，也可能是代客户提问的 MoeGo 内部员工；达到 10 个时列表可能不全。取证前先用会话中的对象 ID、链接，或逐个 company 查数据，确认实际出问题的商家。
 3. 覆盖各业务，团队/domain 字段仅帮助确定背景与目标仓库，不能作为排除理由；实际背景不明时补证。归并同一问题，保存来源稳定身份、链接、现象、预期及依据、影响、平台和验收目标。对当前项目、现有周度值守和 Bug Resolver 的任务/PR 查重，已有在途工作只关联，不重复开工；不自动恢复取消、停止或已关闭项。已有合并修复仍须核对客户受影响版本与修复范围，不能仅凭有 PR 就排除回归。已关联工单的反馈视为已有工单跟进：Intercom 以 `csTickets` 非空，或 `jiraKeys` 中经 jira skill 回读确认存在的研发项目工单（如 MER、IFRFE）为准；Canny、Facebook 在补证时经 jira skill 按来源链接或标题只读搜索 CS；命中的记录标为已有工单跟进并保存工单号，不再调查验证，也不计入待验证。
 4. 用本项目任务和 metadata 保存候选与来源覆盖，不新增规则后台。三源任一失败时可以保存已读事实和候选，但不新建完整修复批次或宣称无 Bug；记录受影响来源、已尝试路径及补采条件。
@@ -323,7 +323,7 @@ Winches（核对作者为审查人 Multica 用户）在已交付 Bug 任务中�
 
 ### 起草（`回告`）
 
-1. 核对上线：对 `/Users/moego-winches/Desktop/Company/person/slack-multica-relay` 执行 `git fetch origin main`，`git show origin/main:scripts/duty-board.py` 导出到临时目录，以 `--project 724dce94-a8b9-44e7-8390-9c3cbdac7bc0 --ledger-issue GRM-664 --start 2026-10-12 --reviewer <审查人 Slack 用户 ID> --output-dir <临时目录>` 运行，读取 `board.json` 中本 Bug。`state` 不是 `released` 时回复实际状态并结束。上线版本取各 PR 的 `release.tag`，上线日期取其中最晚的 `release.at`（Asia/Shanghai）。
+1. 核对上线：对 `/Users/moego-winches/Desktop/Company/person/slack-multica-relay` 执行 `git fetch origin main`，回读 `git rev-parse origin/main` 固定本次 SHA，用参数数组分别 `git show <同一 SHA>:scripts/duty-board.py`、`scripts/duty-progress.py`、`scripts/duty-queue.py` 导出到同一临时目录，以 `--server-url https://multica.devops.moego.dev --workspace-id 1b6d114a-8407-4ba8-adea-d31209caabe5 --project 724dce94-a8b9-44e7-8390-9c3cbdac7bc0 --ledger-issue GRM-664 --start 2026-10-12 --reviewer <审查人 Slack 用户 ID> --output-dir <临时目录>` 运行，读取 `board.json` 中本 Bug。`state` 不是 `released` 时回复实际状态并结束。上线版本取各 PR 的 `release.tag`，上线日期取其中最晚的 `release.at`（Asia/Shanghai）。
 2. 读取材料：本任务正文与交付 thread 根消息（Story、修复范围）；GRM-664 中本 Bug 最新 `kind=bug` 记录的 `source`、`sourceUrl` 与 `delivery.permalink`。
    - Intercom：经 intercom skill `get-conversation` 理解客户诉求；`get-teammates` 取 `primary_admin_id` 对应客服，用其 email 经 slack skill `resolve` 找到 Slack 用户。Winches 指定 CS 时以指定为准。没有主要客服、解析不到或账号已停用时，在草稿中写明原因并请 Winches 指定，不猜测。不在草稿、评论或台账中输出客服邮箱。
    - Canny：以任务正文中已核实的问题描述为准；需要原帖细节时按 `moe-feedback-collector` 的 Canny 授权路径只读访问。

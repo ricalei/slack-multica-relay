@@ -182,6 +182,52 @@ class BoardStagesTests(unittest.TestCase):
         self.assertEqual((loaded['identifier'], note), ('GRM-1', None))
         load.assert_called_once_with('GRM-1')
 
+    def test_partial_sources_keep_known_counts_in_all_channels(self):
+        scan, issues = fixture([candidate('bug')])
+        scan['metadata']['dailyScan'].update(coverageComplete=False, collected={'canny': 2},
+                                            sources={'intercom': {'status': 'failed'}})
+        with patch.object(board, 'load_issues', return_value=issues), \
+             patch.object(board, 'run_json', return_value=[]):
+            scans, bugs, _ = board.collect(self.args(), NOW)
+        result = board.build_board(scans, bugs, dt.date(2026, 10, 21), dt.date(2026, 10, 22))
+        self.assertEqual(result['rows'][-1]['collectedBySource'], {'canny': 2})
+        self.assertEqual(result['rows'][-1]['collected'], 2)
+        html = board.render_html(board.html_payload(result, NOW, None, None))
+        for text in (board.render_markdown(result, NOW), board.render_slack(result, NOW), html):
+            self.assertIn('已采集 2 条', text)
+            self.assertIn('来源覆盖不完整', text)
+
+    def test_legacy_round_uses_final_ledger_when_metadata_has_no_collection_counts(self):
+        scan, issues = fixture([candidate('bug')])
+        del scan['metadata']['dailyScan']['collected']
+        entry = {'issue': 'GRM-1', 'kind': 'scan', 'feedbackDate': '2026-10-21',
+                 'coverageComplete': True, 'collected': {'canny': 2, 'facebook': 1, 'intercom': 4}}
+        comments = [{'created_at': '2026-10-22T01:00:00Z',
+                     'content': board.BOARD_MARKER + '\n```json\n' + json.dumps(entry) + '\n```'}]
+        with patch.object(board, 'load_issues', return_value=issues), \
+             patch.object(board, 'run_json', side_effect=[comments, []]):
+            scans, bugs, _ = board.collect(self.args(), NOW)
+        result = board.build_board(scans, bugs, dt.date(2026, 10, 21), dt.date(2026, 10, 22))
+        self.assertEqual(result['rows'][-1]['collected'], 7)
+        self.assertEqual(result['rows'][-1]['progress']['collection']['state'], 'completed')
+        self.assertIn('剩余调查', result['rows'][-1]['progress']['nextAction'])
+
+    def test_collection_start_is_visible_before_any_source_finishes(self):
+        scan, issues = fixture([])
+        scan['metadata']['dailyRound']['registrationComplete'] = False
+        scan['metadata']['dailyScan'] = {'targetDate': '2026-10-21', 'coverageComplete': False,
+                                        'sources': {'canny': {'status': 'queued'}}}
+        run = {'issue_id': 'scan', 'agent_id': 'agent', 'status': 'running'}
+        with patch.object(board, 'load_issues', return_value=issues), \
+             patch.object(board, 'run_json', side_effect=[[], [run]]):
+            scans, bugs, _ = board.collect(self.args(), NOW)
+        result = board.build_board(scans, bugs, dt.date(2026, 10, 21), dt.date(2026, 10, 22))
+        self.assertTrue(result['rows'][-1]['scanned'])
+        stage = result['rows'][-1]['progress']
+        self.assertEqual(stage['collection']['state'], 'collecting')
+        self.assertEqual(stage['current'][0]['phase'], '采集')
+        self.assertIn('采集执行中', board.render_slack(result, NOW))
+
     def test_confirmations_do_not_double_count_after_bug_registration(self):
         row = candidate('bug', 'confirmed')
         scan, issues = fixture([row])

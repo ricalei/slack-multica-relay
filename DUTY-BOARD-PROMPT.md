@@ -40,7 +40,7 @@
 
    核对输出：读取 `out/board.json`、`out/board.md`、`out/slack.md`，并确认 `out/board.html` 已生成，标题中的截至日期等于 today 前一天，各份输出数字一致。脚本给出的数字、状态与 warnings 原样发布，不改写、不补充推测；warnings 已在看板「数据说明」和 Slack「需要关注」中。脚本 stdout 的 `scanNote` 非空时表示 HTML 缺少截至日逐条记录，原样记下其中原因。
 6. 正常每日发布去重：读取 GRM-665 评论，以及 Slack 频道最近一天由当前 Bot 发送的消息。已有相同「截至 YYYY-MM-DD 反馈日」标题的看板时视为本日已发布，不重复发送或评论，直接答复已有链接并结束；只缺其中一处时只补缺失的那一处；看板消息已存在但其 thread 中没有当日 `board.html` 时只补传附件。
-   真人明确要求“补发今日看板”时，复用已有采集 run、任务、证据和索引重新生成阶段快照，允许在相同反馈日再发布一条；在脚本正文前增加“阶段进度补发”的说明，不编辑或删除原消息。以本次触发评论 ID 或任务正文明确的 republishId 标识单次补发请求，在 GRM-665 评论保留 `<!-- duty-board-republish:v1 id=<稳定请求 ID> -->` 及 Slack、HTML 回执。同一请求重试复用既有回执；未知发送结果先读频道或 thread 核对，不重复发送。禁止为补发调用 collect-daily、触发值守扫描或改动其进度，Facebook、Intercom 成功窗口直接复用。
+   真人明确要求“补发今日看板”时，复用已有采集 run、任务、证据和索引重新生成阶段快照，允许在相同反馈日再发布一条；在脚本正文前增加“阶段进度补发”的说明，不编辑或删除原消息。以本次触发评论 ID 或任务正文明确的 republishId 标识单次补发请求，在新 Slack 根消息末尾同时保留「补发编号：<稳定请求 ID>」，在 GRM-665 评论保留 `<!-- duty-board-republish:v1 id=<稳定请求 ID> -->` 及 Slack、HTML 回执。发送前在本次工作目录保存请求 ID、候选正文和文件哈希；每一步成功后立即保存带同一 ID 的消息 ts、permalink、文件 ID 或评论 ID 回执。同一请求重试复用既有回执；未知发送结果先按请求 ID 读频道或对应 thread 核对，不能只按日期或通用补发前缀判断，也不因最终 GRM 回执缺失而重复发送。禁止为补发调用 collect-daily、触发值守扫描或改动其进度，Facebook、Intercom 成功窗口直接复用。
 
 7. 发送 Slack：按 Slack Skill 使用 `send --channel <交付频道 ID> --text-file <工作目录>/out/slack.md --as bot`，先 `--dry-run` 核对 mention 清单为空，再用返回的 `preview_digest` 以 `--confirm-preview` 发送；用 `get` 回读消息并记录 permalink 与消息 ts。发送失败不换身份或改格式重试，在评论中写明未发送及原因。
    消息发送成功后上传 HTML 看板：`files_upload --channel <交付频道 ID> --thread-ts <看板消息 ts> --file <工作目录>/out/board.html --filename duty-board-<截至日期>.html --message '完整看板（HTML，可直接打开）' --as bot`，再用 `replies` 回读确认附件在该 thread。上传失败或结果不明时先回读，确认未上传才重试一次；仍失败时在评论中写明原因，不改用其它频道或身份。消息未发送时不上传。

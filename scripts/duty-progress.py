@@ -13,14 +13,17 @@ def count(value):
     return type(value) is int and value >= 0
 
 
-def collection(scan):
+def collection(scan, scan_record=None):
     data = queue.meta(scan, 'dailyScan')
     values = data.get('collected')
+    # 旧轮只约定最终台账保存采集数；读取时兼容，不为看板迁移旧轮 metadata。
+    if values is None:
+        values = (scan_record or {}).get('collected')
     if values is not None and (not isinstance(values, dict)
                               or any(not count(value) for value in values.values())):
         raise queue.QueueError('采集数量不是有效非负整数')
     known = {key: values[key] for key in SOURCES if isinstance(values, dict) and count(values.get(key))}
-    covered = data.get('coverageComplete')
+    covered = data.get('coverageComplete', (scan_record or {}).get('coverageComplete'))
     complete_counts = len(known) == len(SOURCES)
     state = 'completed' if covered is True and complete_counts else 'collecting'
     sources = data.get('sources') or {}
@@ -93,7 +96,7 @@ def repair(scan, issues, investigated, members):
             'currentIssueId': current, 'waitingAuthorization': waiting_authorization}, bugs
 
 
-def snapshot(scan, issues, runs, now, issue_url_base):
+def snapshot(scan, issues, runs, now, issue_url_base, scan_record=None):
     """阶段结论来自已保存证据；当前处理只认真实 run，不把 index 或 intent 当成正在执行。"""
     result = {'snapshotAt': now.isoformat(), 'scanIssue': scan['identifier'], 'activityKnown': runs is not None,
               'scanUrl': issue_url_base + scan['identifier'], 'current': [], 'warnings': []}
@@ -101,7 +104,7 @@ def snapshot(scan, issues, runs, now, issue_url_base):
     for name in ('collection', 'investigation', 'repair'):
         try:
             if name == 'collection':
-                result[name] = collection(scan)
+                result[name] = collection(scan, scan_record)
             elif name == 'investigation':
                 result[name], members = investigation(scan, issues)
             else:
@@ -121,7 +124,8 @@ def snapshot(scan, issues, runs, now, issue_url_base):
             if (not row or run.get('status') not in queue.IN_FLIGHT
                     or run.get('agent_id') != scan.get('assignee_id')):
                 continue
-            phase = '调查' if row['id'] in member_ids else '修复' if row['id'] in bug_ids else '扫描汇总'
+            scan_phase = '采集' if result['collection']['state'] != 'completed' else '扫描汇总'
+            phase = '调查' if row['id'] in member_ids else '修复' if row['id'] in bug_ids else scan_phase
             result['current'].append({'identifier': row['identifier'], 'url': issue_url_base + row['identifier'],
                                       'summary': row['title'].split('｜')[-1], 'phase': phase, 'status': run['status']})
     if result['investigation']['state'] == 'attention' or result['repair']['state'] == 'attention':

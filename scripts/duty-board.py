@@ -359,8 +359,11 @@ def progress_rows(progress):
     """三种输出共享同一阶段文案；完整交付只计经过调度器回执校验的版本。"""
     collected, inv, fix = (progress[key] for key in ('collection', 'investigation', 'repair'))
     source = '、'.join(f'{key.capitalize()} {value}' for key, value in (collected.get('collected') or {}).items())
+    known = collected.get('collected')
+    partial = f"已采集 {sum(known.values())} 条（{source}）；" if known is not None else ''
     collection_text = {'completed': f"已完成 {_num(collected.get('total'))} 条（{source}）",
-                       'collecting': '采集或覆盖核对进行中', 'incomplete': '来源覆盖不完整，保留已采集结果',
+                       'collecting': partial + '采集或覆盖核对进行中',
+                       'incomplete': partial + '来源覆盖不完整，保留已采集结果',
                        'attention': '阶段数据待核对'}[collected['state']]
     if inv['state'] in {'investigating', 'completed'}:
         inv_text = (f"已留档 {inv['completed']}/{inv['total']} 个问题 · 确认可修 {inv['confirmed']}"
@@ -660,9 +663,8 @@ def collect(args, now):
                 if progress_module.count(counts.get(key)):
                     record[key] = counts[key]
             if _meta(issue, 'dailyRound'):
-                record['progress'] = progress_module.snapshot(issue, issues, runs, now, args.issue_url_base)
-                record['collected'] = (record['progress']['collection'].get('collected')
-                                       if record['progress']['collection'].get('total') is not None else None)
+                record['progress'] = progress_module.snapshot(issue, issues, runs, now, args.issue_url_base, board)
+                record['collected'] = record['progress']['collection'].get('collected')
                 warnings.extend(record['progress']['warnings'])
             elif board is None:
                 warnings.append(f"{issue['identifier']} 已有采集记录，最终分类或调查进度尚未登记")
