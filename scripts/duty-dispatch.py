@@ -54,13 +54,13 @@ def check_runs(active, issue_ids, agent_id, runtime_id, workspace_id):
 
 
 def finalize_plan(round_id, current_issue, current_run, active, member_ids, total):
-    """调查全部留档后由原扫描唯一汇总；调查运行尚未退出时原扫描直接退出，由最后退出的调查运行排汇总后继。"""
+    """调查全部留档后由原扫描唯一汇总。最后一个调查运行在退出前已排汇总后继，后继可能在它退出前开跑；
+    此时原扫描再排一个自身后继后退出，等调查运行全部退出再汇总，避免两边都退出后无人接手。"""
     if current_issue == round_id:
         if any(run['issue_id'] == round_id and run['id'] != current_run for run in active):
             return {'action': 'yield_to_finalizer'}
-        if any(run['issue_id'] in member_ids for run in active):
-            return {'action': 'yield_to_members'}
-        return {'action': 'finalize_round_here', 'total': total, 'completed': total, 'remaining': 0}
+        if not any(run['issue_id'] in member_ids for run in active):
+            return {'action': 'finalize_round_here', 'total': total, 'completed': total, 'remaining': 0}
     return {'action': 'finalize_round', 'issueIds': [round_id], 'total': total, 'completed': total, 'remaining': 0}
 
 
@@ -283,6 +283,14 @@ class Native:
     def rerun(self, issue_id):
         self.call(['issue', 'rerun', issue_id])
 
+    def status(self, issue_id, value):
+        try:
+            self.call(['issue', 'status', issue_id, value, '--no-start'])
+        except Error:
+            pass
+        if self.issue(issue_id).get('status') != value:
+            raise Error('任务状态写后回读不一致，保留现场')
+
 
 def launch(native, journal, issue_id, agent_id, runtime_id, *, successor=False, key=None):
     """保存启动前 run 集合；超时后只认实际新 run，未知结果不能重复启动。
@@ -338,12 +346,21 @@ def launch(native, journal, issue_id, agent_id, runtime_id, *, successor=False, 
 def advance(native, journal, scope, now=None):
     snapshot = native.snapshot()
     result = plan(snapshot, handoff=True, **scope)
-    if result['action'] in ('register_round', 'yield_to_finalizer', 'yield_to_members'):
+    if result['action'] in ('register_round', 'yield_to_finalizer'):
         return result
     round_id = scope['round_id']
     if result['action'] == 'finalize_round_here':
         native.metadata(round_id, 'dailyDispatch', {
             'schemaVersion': 1, 'phase': 'finalizing', 'finalizerRunId': scope['current_run']})
+        scan = next(row for row in snapshot['issues'] if row['id'] == round_id)
+        if queue.lane_store(scan):
+            # 全部工位已退出，此时收尾工位卡不会打断任何运行：标记 done 并把任务置为完成。
+            for lane in queue.round_lanes(scan, snapshot['issues'], scope['agent_id']):
+                value = {**queue.meta(lane, 'dailyLane'), 'state': 'done', 'currentCandidateId': None}
+                if queue.meta(lane, 'dailyLane') != value:
+                    native.metadata(lane['id'], 'dailyLane', value)
+                if lane.get('status') != 'done':
+                    native.status(lane['id'], 'done')
     by_id = {row['id']: row for row in snapshot['issues']}
     receipts, errors, claimed = [], [], {}
     stamp = (now or dt.datetime.now(dt.timezone.utc)).isoformat()
