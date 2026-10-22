@@ -8,7 +8,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from duty_queue_test import candidate, freeze, issue, add_repair, deliver, suspended, block, receipt
+from duty_queue_test import (candidate, freeze, issue, add_repair, deliver, suspended, block, receipt,
+                             lane_freeze, conclude)
 
 
 spec = importlib.util.spec_from_file_location('board_stages', Path(__file__).parents[1] / 'scripts/duty-board.py')
@@ -35,6 +36,19 @@ def snapshot(scan, issues, runs=None):
 
 
 class ProgressTests(unittest.TestCase):
+    def test_lane_round_progress_counts_comment_records_and_shows_each_lane(self):
+        scan, _ = fixture([])
+        lanes = lane_freeze(scan, ['a', 'b', 'c'])
+        conclude(lanes[0], 'a', 'confirmed')
+        lanes[1]['metadata']['dailyLane'].update(state='investigating', currentCandidateId='intercom:b')
+        runs = [{'issue_id': 'lane-2', 'agent_id': 'agent', 'status': 'running'}]
+        result = snapshot(scan, [scan, *lanes], runs)
+        self.assertEqual((result['investigation']['completed'], result['investigation']['total'],
+                          result['investigation']['confirmed']), (1, 3, 1))
+        self.assertEqual(result['current'][0]['phase'], '调查')
+        self.assertEqual(result['current'][0]['summary'], '工位 2/2：摘要b')
+        self.assertEqual(result['investigation']['confirmedIssueIds'], ['scan:intercom:a'])
+
     def test_partial_investigation_has_collection_and_real_current_work_without_final_ledger(self):
         scan, issues = fixture([candidate('first', 'confirmed'), candidate('second')])
         run = {'issue_id': 'second', 'agent_id': 'agent', 'status': 'running'}

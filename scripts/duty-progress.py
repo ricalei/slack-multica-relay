@@ -117,8 +117,15 @@ def snapshot(scan, issues, runs, now, issue_url_base, scan_record=None):
             result[name] = {'state': 'attention', 'completed': None, 'total': None, 'confirmed': None}
             label = {'collection': '采集', 'investigation': '调查', 'repair': '修复'}[name]
             result['warnings'].append(f"{scan['identifier']} 的{label}阶段数据不完整或证据待核对")
-    by_id = {row['id']: row for row in [scan, *members, *bugs]}
-    member_ids, bug_ids = {row['id'] for row in members}, {row['id'] for row in bugs}
+    lanes = []
+    if queue.lane_store(scan):
+        try:
+            lanes = queue.round_lanes(scan, issues, scan.get('assignee_id'))
+        except queue.QueueError:
+            result['warnings'].append(f"{scan['identifier']} 的调查工位登记待核对")
+    by_id = {row['id']: row for row in [scan, *members, *bugs, *lanes]}
+    member_ids, bug_ids = {row['id'] for row in members} | {row['id'] for row in lanes}, {row['id'] for row in bugs}
+    titles = {queue.meta(row, 'dailyInvestigation').get('candidateId'): row['title'].split('｜')[-1] for row in members}
     if runs is None:
         result['warnings'].append('值守运行状态读取失败，当前处理任务未知')
     else:
@@ -129,8 +136,13 @@ def snapshot(scan, issues, runs, now, issue_url_base, scan_record=None):
                 continue
             scan_phase = '采集' if result['collection']['state'] != 'completed' else '扫描汇总'
             phase = '调查' if row['id'] in member_ids else '修复' if row['id'] in bug_ids else scan_phase
+            summary = row['title'].split('｜')[-1]
+            claim = queue.meta(row, 'dailyLane').get('currentCandidateId')
+            if claim in titles:
+                # 工位卡展示「工位 n/2：正在查的候选」，便于看出两路各自在查什么。
+                summary = f'{summary}：{titles[claim]}'
             result['current'].append({'identifier': row['identifier'], 'url': issue_url_base + row['identifier'],
-                                      'summary': row['title'].split('｜')[-1], 'phase': phase, 'status': run['status']})
+                                      'summary': summary, 'phase': phase, 'status': run['status']})
     if result['investigation']['state'] == 'attention' or result['repair']['state'] == 'attention':
         result['activityKnown'] = False
     inv, fix = result['investigation'], result['repair']

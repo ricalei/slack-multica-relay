@@ -627,6 +627,13 @@ def collect(args, now):
     ledger, warnings = ledger_entries(run_json(['multica', 'issue', 'comment', 'list', args.ledger_issue,
                                                 '--full', '--compact', '--output', 'json']))
     issues = load_issues(args.project)
+    # 工位轮次的清单与逐条结论在评论里，读取后才能推导调查进度；读取失败只让该轮进度显示待核对。
+    try:
+        progress_module.queue.attach_comments(issues, lambda issue_id: run_json(
+            ['multica', 'issue', 'comment', 'list', issue_id, '--full', '--compact', '--output', 'json']),
+            include_finished=True)
+    except (subprocess.CalledProcessError, json.JSONDecodeError, OSError, progress_module.queue.QueueError):
+        warnings.append('调查工位评论读取失败，相关轮次的调查进度待核对')
     runs = []
     if any(_meta(issue, 'dailyRound') for issue in issues):
         try:

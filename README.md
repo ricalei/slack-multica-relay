@@ -82,19 +82,19 @@ Cloudflare 使用 `pnpm dev:cf`、`pnpm build:cf` 和 `pnpm deploy:cf`，共享�
 
 ## 每日值守调查闭环
 
-每日流程保留两个 Agent：「GRM 每日 Bug 值守」和独立的「GRM 每日值守看板」。值守 Agent 每天北京时间 03:00 按固定阶段执行：三源采集 → 固定本轮清单 → 最多并发 2 条调查与留档 → 汇总结论 → 固定修复队列 → 逐条完整交付。看板 Agent 的规则、脚本和 10:00 定时保持原样。
+每日流程保留两个 Agent：「GRM 每日 Bug 值守」和独立的「GRM 每日值守看板」。值守 Agent 每天北京时间 03:00 按固定阶段执行：三源采集 → 固定本轮清单 → 两张调查工位卡并行调查与留档 → 汇总结论 → 固定修复队列（全局一次一项） → 逐条完整交付。看板 Agent 的规则、脚本和 10:00 定时保持原样。
 
 值守规则在 [DAILY-BUG-DUTY-PROMPT.md](DAILY-BUG-DUTY-PROMPT.md)，扫描 Autopilot 的任务正文在 [DAILY-BUG-SCAN-PROMPT.md](DAILY-BUG-SCAN-PROMPT.md)。采集按每来源最后成功日期补到昨天，已成功窗口复用。调查只补读指定原帖、会话或 thread，不调用日采集，Facebook、Intercom 不重复采集。
 
-每轮扫描用 `dailyRound` 冻结疑似 Bug 的数量和 candidateId 集合摘要，清单与完整调查过程放真实附件；metadata 只保留状态和回执。每条候选登记为原扫描下的调查子任务，`dailyInvestigation.roundId` 与 sourceScanId 指向当前扫描。确认一项后继续调查下一项，不能提前开始修复。每条确认、排除、重复、已有工单或外部缺证结论都须有可回读的报告；未调查、技术失败和泛化缺口不算完成。
+每轮扫描用 `dailyRound` 冻结疑似 Bug 的数量和 candidateId 集合摘要，清单与完整调查过程放真实附件；metadata 只保留状态和回执。工位轮次不再为每条候选建任务：清单写成原扫描上的 `daily-round-manifest:v3` 评论，原扫描下只建两张调查工位卡，每条结论以 `daily-investigation:v3` 评论追加在工位卡上，同一候选取最新的 Agent 记录。修复项以 `<扫描 UUID>:<candidateId>` 对应调查记录。逐条调查轮次仍是每条候选一张调查子任务。确认一项后继续调查下一项，不能提前开始修复。每条确认、排除、重复、已有工单或外部缺证结论都须有可回读的报告；未调查、技术失败和泛化缺口不算完成。
 
 全部候选有依据的结论与完整调查索引回读后，才能设置 investigationComplete；三源覆盖完整后才建立原扫描的固定 dailyBatch。Bug 子任务用 investigationIssueId 对应调查项，全部确认项登记并回读后固定 total、bugIds 和当前位置。同一个值守 Agent 沿用现有修复、CI、动态验收、最终 HTML、PR 与交付回读门槛逐项执行，完整交付后推进固定队列。需要真人或外部条件才能继续的受阻项先在交付频道发受阻结果并回读，记入 `blockedBugIds` 与 `blockNotices` 后接续下一项，真人解除后在原任务补完；固定队列走完即结束本轮，最后一项的消息兼作批次汇总。固定在 `701a730` 或 `06de955` 的旧轮次仍在受阻时停住，等待授权或跳过。
 
 真正外部缺证必须保留原来源、实现、数据与验证路径的实际尝试、缺失材料和恢复条件，作为已调查结论保存在任务、完整报告与分类台账；值守 Agent 的 Slack 汇总不单列这些内容或数量，也不另发通知。不能把尚未调查项留在候选附件后报告扫描完成。旧扫描、旧 pending-candidates 和历史待调查已停止，仅用于追溯、查重，不自动导入新轮次。停止不删除证据，不改写已有修复与交付结果。
 
-新协议通过 `scripts/duty-dispatch.py` 复用本 Runtime 的共享短锁，只在完整登记且三源覆盖齐后将值守 Agent 的并发从 1 调到 2，按真实运行补足两个调查名额。每条调查只保存自身结论和报告；全轮有效结论齐备后先恢复并发 1，再唯一交接给原扫描汇总。启动结果不明保留 journal 并回读 run ID，不重复派发；技术失败不能冒充外部缺证或调查完成。
+`scripts/duty-dispatch.py` 复用本 Runtime 的共享短锁，在完整登记且三源覆盖齐后给两个工位各领取一条候选并启动；工位结论回读后领取下一条并给自己排后继，全轮有效结论齐备后由最后退出的工位唯一交接给原扫描汇总。脚本不修改 Agent 并发，其它轮次仍在调查或修复时本轮照常推进；修复队列全局一次只登记一条，其它队列结束后由 `release-repair` 唤起等待的轮次。启动结果不明保留 journal 并回读 run ID，不重复派发；技术失败不能冒充外部缺证或调查完成。
 
-`dailyExecution` 固定每轮的 policy、并发、Runtime 与 schedulerRevision；未带新协议的既有轮次继续使用 `701a7303acb6da9b4ce40e1838aafa0922b8a22a` 的串行流程，不迁移现场。新协议的调用方法与写入边界见 [值守 Prompt](DAILY-BUG-DUTY-PROMPT.md#调查并发协议)。调查完成后的原固定修复流程保持串行。
+`dailyExecution` 固定每轮的 policy、Runtime 与 schedulerRevision；没有 dailyExecution 的既有轮次继续使用 `701a7303acb6da9b4ce40e1838aafa0922b8a22a` 的串行流程，不迁移现场；逐条调查轮次停在派发时可一次性升级调度版本。仍有要求并发 1 的旧版本轮次时并发保持 1，结束后由真人固定为 2。新协议的调用方法与写入边界见 [值守 Prompt](DAILY-BUG-DUTY-PROMPT.md#调查并发协议)。调查完成后的原固定修复流程保持串行。
 
 `scripts/duty-queue.py` 通过原生 Multica CLI 完整分页读取现场，生成 protocolVersion=2 的只读计划。计划器核对固定身份集合、每条调查依据与报告回执、全轮索引、来源覆盖、确认项与修复清单，以及最终交付版本；一项确认不能越过其余未结束调查。脚本不写任务或启动运行，真实动作仍由 Agent 按“重读 → intent → 原生启动 → runId 回读 → 结束当前运行”执行。未知写入结果先查现状，不重复创建或派发。
 
