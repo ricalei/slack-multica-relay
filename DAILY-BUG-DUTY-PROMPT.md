@@ -35,7 +35,7 @@ Multica 任务操作一律用原生 CLI：先看帮助，核对服务、GRM 工�
 
 ## 1. 每日采集与批次
 
-1. 按 Asia/Shanghai 的前一个完整自然日，对三个来源依次执行 `collect-daily --source <source> --period-start <start> --period-end <yesterday>`，使用同一独立 output-root。首次只读昨天，后续从该来源最后成功日期的次日补到昨天；若进度已覆盖昨天则跳过重复采集。若前次显式读取了未结束的当天，须在该日结束后重读。来源失败不推进其成功日期，恢复时补缺失窗口，不做历史积压扫描。读取 runArtifact 的 evidence，不用终端样例代替来源。
+1. 开始采集前先保存并回读 dailyScan.targetDate（本次实际开始日的 Asia/Shanghai 前一天）、sources 的初始状态与 coverageComplete=false；恢复时复用已保存目标日，不重算或覆盖旧轮现场。随后对三个来源依次执行 `collect-daily --source <source> --period-start <start> --period-end <yesterday>`，使用同一独立 output-root。每来源成功或失败后立即保存其真实状态、已知 collected 数量及来源回执，未知或失败不填成 0，不等待三源或初筛全部结束。首次只读昨天，后续从该来源最后成功日期的次日补到昨天；若进度已覆盖昨天则跳过重复采集。若前次显式读取了未结束的当天，须在该日结束后重读。来源失败不推进其成功日期，恢复时补缺失窗口，不做历史积压扫描。读取 runArtifact 的 evidence，不用终端样例代替来源。
 2. Canny 不用 vote/Quick Win 门槛过滤 Bug；按 newest 读取到日期边界后，只取窗口内创建的帖子及其页面可见评论。覆盖口径为 period-created-posts / page-visible；不承诺发现旧帖当天的新评论、编辑或票数变化，不称全历史或全量评论。评论不全时可按需补背景，信息不足的候选不能进入修复。Facebook 只代表现有 Slack 汇总频道，不直接抓 Facebook。Intercom 每个会话一条 evidence：`inWindow=true` 的客户消息是当日反馈，其余消息只作上下文；自行判断是否 Bug 与业务归属，不只关注功能需求；被隐藏的邮箱、电话、链接不得还原。本轮 scan 保存候选后，按 Intercom manifest 的 `runArtifact` 与 `evidenceArtifacts` 删除会话文件；之后需要原文时，用会话链接经 intercom skill 的 `get-conversation` 重读。Intercom evidence 的 `csTickets` 是该会话已关联的 CS 工单；`moegoCompanyIds` 是联系人所属公司的 MoeGo company ID，只是候选：联系人可能属于多个公司，也可能是代客户提问的 MoeGo 内部员工；达到 10 个时列表可能不全。取证前先用会话中的对象 ID、链接，或逐个 company 查数据，确认实际出问题的商家。
 3. 覆盖各业务，团队/domain 字段仅帮助确定背景与目标仓库，不能作为排除理由；实际背景不明时补证。归并同一问题，保存来源稳定身份、链接、现象、预期及依据、影响、平台和验收目标。对当前项目、现有周度值守和 Bug Resolver 的任务/PR 查重，已有在途工作只关联，不重复开工；不自动恢复取消、停止或已关闭项。已有合并修复仍须核对客户受影响版本与修复范围，不能仅凭有 PR 就排除回归。已关联工单的反馈视为已有工单跟进：Intercom 以 `csTickets` 非空，或 `jiraKeys` 中经 jira skill 回读确认存在的研发项目工单（如 MER、IFRFE）为准；Canny、Facebook 在补证时经 jira skill 按来源链接或标题只读搜索 CS；命中的记录标为已有工单跟进并保存工单号，不再调查验证，也不计入待验证。
 4. 用本项目任务和 metadata 保存候选与来源覆盖，不新增规则后台。三源任一失败时可以保存已读事实和候选，但不新建完整修复批次或宣称无 Bug；记录受影响来源、已尝试路径及补采条件。
@@ -323,7 +323,7 @@ Winches（核对作者为审查人 Multica 用户）在已交付 Bug 任务中�
 
 ### 起草（`回告`）
 
-1. 核对上线：对 `/Users/moego-winches/Desktop/Company/person/slack-multica-relay` 执行 `git fetch origin main`，`git show origin/main:scripts/duty-board.py` 导出到临时目录，以 `--project 724dce94-a8b9-44e7-8390-9c3cbdac7bc0 --ledger-issue GRM-664 --start 2026-10-12 --reviewer <审查人 Slack 用户 ID> --output-dir <临时目录>` 运行，读取 `board.json` 中本 Bug。`state` 不是 `released` 时回复实际状态并结束。上线版本取各 PR 的 `release.tag`，上线日期取其中最晚的 `release.at`（Asia/Shanghai）。
+1. 核对上线：对 `/Users/moego-winches/Desktop/Company/person/slack-multica-relay` 执行 `git fetch origin main`，回读 `git rev-parse origin/main` 固定本次 SHA，用参数数组分别 `git show <同一 SHA>:scripts/duty-board.py`、`scripts/duty-progress.py`、`scripts/duty-queue.py` 导出到同一临时目录，以 `--server-url https://multica.devops.moego.dev --workspace-id 1b6d114a-8407-4ba8-adea-d31209caabe5 --project 724dce94-a8b9-44e7-8390-9c3cbdac7bc0 --ledger-issue GRM-664 --start 2026-10-12 --reviewer <审查人 Slack 用户 ID> --output-dir <临时目录>` 运行，读取 `board.json` 中本 Bug。`state` 不是 `released` 时回复实际状态并结束。上线版本取各 PR 的 `release.tag`，上线日期取其中最晚的 `release.at`（Asia/Shanghai）。
 2. 读取材料：本任务正文与交付 thread 根消息（Story、修复范围）；GRM-664 中本 Bug 最新 `kind=bug` 记录的 `source`、`sourceUrl` 与 `delivery.permalink`。
    - Intercom：经 intercom skill `get-conversation` 理解客户诉求；`get-teammates` 取 `primary_admin_id` 对应客服，用其 email 经 slack skill `resolve` 找到 Slack 用户。Winches 指定 CS 时以指定为准。没有主要客服、解析不到或账号已停用时，在草稿中写明原因并请 Winches 指定，不猜测。不在草稿、评论或台账中输出客服邮箱。
    - Canny：以任务正文中已核实的问题描述为准；需要原帖细节时按 `moe-feedback-collector` 的 Canny 授权路径只读访问。
@@ -361,9 +361,10 @@ Winches（核对作者为审查人 Multica 用户）在已交付 Bug 任务中�
 
 ## 看板字段台账
 
-每日值守看板只读取台账任务「每日 Bug 值守看板｜字段台账」（GRM-664，`01a139d1-918a-741c-93ad-29b7d5a1c6b0`）中的记录，不读取 dailyBatch、dailyBug 或 dailyScan。台账任务无人指派，在其下评论不会唤醒 Agent；不在其它任务上新增看板 metadata，任务 metadata 总量上限为 8KB。
+每日值守看板在 10:00 只读生成当时的阶段快照：采集数量与覆盖来自 dailyScan，调查完成数与结论来自固定清单内逐条报告，修复完成数来自 dailyBatch/dailyBug 的对应版本完整交付回执，当前处理来自真实 run；最终分类、PR、回告仍复用台账任务「每日 Bug 值守看板｜字段台账」（GRM-664，`01a139d1-918a-741c-93ad-29b7d5a1c6b0`）。最终台账尚未登记时也展示已有阶段事实，不能把调查中或修复中写成未扫描。台账任务无人指派，在其下评论不会唤醒 Agent；不在其它任务上新增看板 metadata，任务 metadata 总量上限为 8KB。
 
 - 写法：在台账任务追加顶层评论，首行 `<!-- duty-board:v1 -->`，再写一句说明和一个 ```json 代码块，内容为单个对象或同一次写入的对象数组。字段变化时追加完整新记录，不修改或删除旧评论；看板按任务与记录类型（kind）各取最新一条，同一 Bug 的 bug 与 notify 记录互不覆盖。写后用 `issue comment list` 回读，确认 JSON 可解析且字段一致。
+- 阶段留档：原扫描在采集与初筛完成后立即保存现有 dailyScan 的 targetDate、sources、collected、coverageComplete、counts 与索引回执，不能等全部调查后才保存采集事实。每条调查和修复按现有协议及时保存自身证据、结论和真实交付回执；新协议调查运行仍只写自身结果，不为看板并发更新父扫描的共享字段。看板自行只读推导阶段进度，不新增等待看板、额外采集或业务状态迁移；当前轮继续使用自己的固定调度版本。
 - 扫描记录：每次 scan 结束（含零项合格、缺源）写入 `{"issue":"<扫描任务编号>","kind":"scan","feedbackDate":"<上海目标反馈日>","coverageComplete":true|false,"collected":{"canny":n,"facebook":n,"intercom":n},"nonBug":n,"productDecision":n,"csFollowed":n,"suspected":n,"outcomes":{"confirmed":n,"duplicate":n,"verificationBlocked":n,"excludedAfterInvestigation":n}}`；一次 scan 覆盖多个反馈日时每日一条，outcomes 为本次扫描结束时的状态。
 - Bug 记录：每个确认可修的 Bug 建任务后立即写入 `{"issue":"<Bug 任务编号>","kind":"bug","feedbackDate":"<原反馈创建的上海日期>","source":"canny|facebook|intercom","sourceUrl":"<原反馈链接>","candidateId":"<候选 ID>","prs":[],"delivery":null}`，只登记未启动的 Bug 也要写。PR 创建或增减、首次 Slack 交付后，追加该 Bug 的完整新记录：`prs` 为全部 PR 链接，`delivery` 为 `{"permalink":"<该 Bug Slack 交付 thread 根消息链接>"}`。
 - 分类口径，每条采集记录只计一次：collected 合计 = nonBug + productDecision + csFollowed + suspected。nonBug 指不描述既有功能异常的记录（咨询、闲聊、操作或账务请求等）；productDecision 指新增能力或需要产品取舍的诉求；csFollowed 指按已有工单跟进规则跳过的记录；suspected 指描述既有功能异常、进入 Bug 调查的记录，等于 confirmed + duplicate + verificationBlocked + excludedAfterInvestigation。新流程最终 verificationBlocked 只计已充分调查但真正缺外部材料的记录；未调查项不得写成最终分类。Bug 按原反馈日归属，不按发现它的扫描日。

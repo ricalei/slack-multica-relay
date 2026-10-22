@@ -11,8 +11,10 @@ schedulerRevision=<调度器提交 SHA>
 ## 入口与采集
 
 1. 回读当前 Issue、真实运行、Agent 与项目。Agent 为 `387e0620-8a22-44f5-919c-4a3e6296fcfb`，项目为 `724dce94-a8b9-44e7-8390-9c3cbdac7bc0`，GRM 工作区为 `1b6d114a-8407-4ba8-adea-d31209caabe5`。缺少 metadata 时按 Agent 规则初始化 dailyBatch 和 dailyRound，有现场则恢复，不覆盖。仅新扫描按正文 executionPolicy、schedulerRevision 和真实 Runtime 初始化 dailyExecution；已有旧轮不迁移。采集和登记期间并发保持 1。
-2. 按实际运行时间计算 Asia/Shanghai 前一个完整自然日。每来源首次只采昨天，后续从该来源最后成功日期的次日补到昨天；成功覆盖的窗口复用，失败只补缺失来源。任务标题的 UTC 日期不代替反馈窗口。
+2. 按实际运行时间计算 Asia/Shanghai 前一个完整自然日；开始采集前先保存并回读 dailyScan.targetDate、sources 初始状态及 coverageComplete=false，恢复时复用已保存目标日。每来源成功或失败后立即保存真实状态、已知 collected 数量与回执，未知或失败不填成 0。每来源首次只采昨天，后续从该来源最后成功日期的次日补到昨天；成功覆盖的窗口复用，失败只补缺失来源。任务标题的 UTC 日期不代替反馈窗口。
 3. 使用已合并稳定的 moe-feedback-collector SKILL.md 与 collect-daily CLI，沿用 DAILY_BUG_COLLECTOR_SCRIPT、DAILY_BUG_OUTPUT_ROOT 和 Canny account-ref 协议。独立采集 Canny、Facebook、Intercom，各业务均覆盖；不从 CS 起采，不扩大为历史扫描。Facebook、Intercom 已成功日期与 run 不重复采集。
+
+采集与初筛完成后立即保存现有 dailyScan 的来源覆盖、数量、初筛分类和 scan-evidence-index.json 回执，供 10:00 看板读取阶段快照；调查和修复仍按原协议分别留档，最终扫描台账待全轮调查结束统一写入。阶段展示不推进队列，也不把当前轮迁移到新调度版本。
 
 ## 本轮全部调查完成门槛
 
