@@ -203,6 +203,16 @@ class BugStateTests(unittest.TestCase):
         self.assertEqual(board_module.bug_state([pr('open'), pr('closed')], False), 'pr_closed')
         self.assertEqual(board_module.bug_state([], False), 'fixing')
 
+    def test_blocked_repair_is_listed_apart_unless_merged_or_rejected(self):
+        self.assertEqual(board_module.bug_state([pr('open')], False, blocked=True), 'blocked')
+        self.assertEqual(board_module.bug_state([], False, blocked=True), 'blocked')
+        self.assertEqual(board_module.bug_state([pr('merged')], False, blocked=True), 'released')
+        self.assertEqual(board_module.bug_state([pr('open')], True, blocked=True), 'rejected')
+        board = board_module.build_board([], [bug('K1', '2026-10-13', 'blocked'), bug('W1', '2026-10-13', 'review')],
+                                         dt.date(2026, 10, 13), dt.date(2026, 10, 14))
+        self.assertIn('🚧 受阻 1：[K1]', '\n'.join(board_module.status_lines(board, NOW)))
+        self.assertEqual([entry[0]['identifier'] for entry in board_module.attention(board, NOW)['blocked']], ['K1'])
+
 
 class BoardTests(unittest.TestCase):
     def test_groups_by_batch_feedback_date_and_excludes_outside_window(self):

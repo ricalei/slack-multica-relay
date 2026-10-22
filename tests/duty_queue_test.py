@@ -79,6 +79,21 @@ def deliver(scan, bug):
             'delivery': {'permalink': 'https://slack.example/message', 'readbackVerified': True}}])
 
 
+def block(scan, bug, notified=True):
+    bug['metadata']['dailyBug'].update(state='blocked', blocker={
+        'kind': 'permission_denied', 'reason': '测试部署需合入测试分支，当前身份无合并权限',
+        'resumeCondition': '有权限的人合入测试 PR 后在任务评论继续'})
+    scan['metadata']['dailyBatch'].setdefault('blockNotices', []).append(
+        {'issueId': bug['id'], 'permalink': 'https://slack.example/blocked', 'readbackVerified': notified})
+
+
+def receipt(bug):
+    bug['metadata']['dailyBug'].update(state='delivered', completeDelivery=True, deliveryVersion=1)
+    return {'issueId': bug['id'], 'deliveryVersion': 1, 'pr': 'https://github.com/org/repo/pull/2',
+            'prHead': 'b' * 40, 'report': {**record('html-' + bug['id']), 'multicaAttachmentId': 'html'},
+            'delivery': {'permalink': 'https://slack.example/' + bug['id'], 'readbackVerified': True}}
+
+
 class RoundTests(unittest.TestCase):
     def setUp(self):
         self.scan = issue('scan', dailyScan={'targetDate': '2026-10-21', 'coverageComplete': True})
@@ -253,6 +268,55 @@ class RoundTests(unittest.TestCase):
         receipt['deliveryVersion'] = 1
         with self.assertRaises(queue.QueueError):
             self.plan(row, bug)
+
+    def test_notified_block_moves_to_next_item_without_counting_as_delivery(self):
+        rows = [candidate('first', 'waiting_repair'), candidate('second', 'waiting_repair')]
+        freeze(self.scan, rows, complete=True)
+        bugs = add_repair(self.scan, rows)
+        block(self.scan, bugs[0], notified=False)
+        self.assertEqual(self.plan(*rows, *bugs)['action'], 'resume_repair')
+        self.scan['metadata']['dailyBatch']['blockNotices'][0]['readbackVerified'] = True
+        result = self.plan(*rows, *bugs)
+        self.assertEqual((result['action'], result['issueId'], result['nextIssueId']),
+                         ('advance_after_block', 'bug-first', 'bug-second'))
+        self.assertFalse(queue.verified_delivery(self.scan['metadata']['dailyBatch'], bugs[0]))
+        del bugs[0]['metadata']['dailyBug']['blocker']['resumeCondition']
+        self.assertEqual(self.plan(*rows, *bugs)['action'], 'resume_repair')
+
+    def test_round_closes_with_blocked_items_only_when_each_item_is_delivered_or_notified(self):
+        rows = [candidate('first', 'waiting_repair'), candidate('second', 'waiting_repair')]
+        freeze(self.scan, rows, complete=True)
+        bugs = add_repair(self.scan, rows)
+        block(self.scan, bugs[1])
+        batch = self.scan['metadata']['dailyBatch']
+        batch.update(state='completed', outcome='finished_with_blocked', currentIssueId=None, index=2,
+                     deliveredBugIds=['bug-first'], blockedBugIds=['bug-second'],
+                     completedDeliveries=[receipt(bugs[0])])
+        result = self.plan(*rows, *bugs)
+        self.assertEqual((result['action'], result['outcome'], result['blockedIssueIds']),
+                         ('complete_round', 'finished_with_blocked', ['bug-second']))
+        for change in ({'outcome': 'engineering_delivery_completed'}, {'blockedBugIds': ['bug-second', 'bug-first']},
+                       {'deliveredBugIds': []}):
+            changed = copy.deepcopy(self.scan)
+            changed['metadata']['dailyBatch'].update(change)
+            with self.subTest(change=change), self.assertRaises(queue.QueueError):
+                queue.next_action([changed, *rows, *bugs], [], project_id='project', agent_id='agent',
+                                  current_issue_id='current')
+        batch['blockNotices'][0]['readbackVerified'] = False
+        with self.assertRaises(queue.QueueError):
+            self.plan(*rows, *bugs)
+
+    def test_block_released_later_finishes_as_full_delivery_in_any_order(self):
+        rows = [candidate('first', 'waiting_repair'), candidate('second', 'waiting_repair')]
+        freeze(self.scan, rows, complete=True)
+        bugs = add_repair(self.scan, rows)
+        self.scan['metadata']['dailyBatch'].update(
+            state='completed', outcome='engineering_delivery_completed', currentIssueId=None, index=2,
+            deliveredBugIds=['bug-second', 'bug-first'], blockedBugIds=[],
+            completedDeliveries=[receipt(bugs[1]), receipt(bugs[0])])
+        result = self.plan(*rows, *bugs)
+        self.assertEqual(result['action'], 'complete_round')
+        self.assertNotIn('outcome', result)
 
     def test_human_skip_is_not_converted_to_verified_delivery(self):
         row = candidate(state='waiting_repair')

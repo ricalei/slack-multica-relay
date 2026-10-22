@@ -98,6 +98,26 @@ def verified_delivery(batch, bug_issue):
     return False
 
 
+def verified_block(batch, bug_issue):
+    """受阻原因、继续条件和已回读的 Slack 受阻通知齐全，队列才可越过该项；受阻不计为交付。"""
+    bug = meta(bug_issue, 'dailyBug') if bug_issue else {}
+    block = bug.get('blocker')
+    if (not bug_issue or bug.get('state') != 'blocked' or not isinstance(block, dict)
+            or not all(text(block.get(key)) for key in ('kind', 'reason', 'resumeCondition'))):
+        return False
+    return any(isinstance(notice, dict) and notice.get('issueId') == bug_issue['id']
+               and notice.get('readbackVerified') is True and text(notice.get('permalink'))
+               for notice in batch.get('blockNotices') or [])
+
+
+def covers_queue(bug_ids, delivered, blocked):
+    """完整交付与受阻两组须恰好覆盖固定队列；受阻项解除并交付后从 blocked 移入 delivered。"""
+    if not isinstance(delivered, list) or not isinstance(blocked, list):
+        return False
+    settled = delivered + blocked
+    return all(isinstance(key, str) for key in settled) and sorted(settled) == sorted(bug_ids)
+
+
 def order(issue):
     item = meta(issue, 'dailyInvestigation')
     return (item.get('feedbackDate') or '', issue.get('created_at') or '', issue['id'])
@@ -189,9 +209,16 @@ def round_plan(scan, issues, by_id, agent_id):
             or (batch.get('state') == 'completed' and batch.get('outcome') == 'finished_with_skips')):
         return {'action': 'complete_round', 'issueId': scan['id'], 'outcome': 'finished_with_skips',
                 'reason': '保留真人跳过与未完成范围，不将跳过项标为完整交付'}
-    if (batch.get('state') != 'completed' or batch.get('outcome') != 'engineering_delivery_completed'
-            or batch.get('deliveredBugIds') != bug_ids or not all(verified_delivery(batch, bug) for bug in bugs)):
-        raise QueueError('本轮修复尚未完整交付，不能结束本轮')
+    delivered, blocked = batch.get('deliveredBugIds'), batch.get('blockedBugIds') or []
+    expected_outcome = 'finished_with_blocked' if blocked else 'engineering_delivery_completed'
+    if (batch.get('state') != 'completed' or batch.get('outcome') != expected_outcome
+            or not covers_queue(bug_ids, delivered, blocked)
+            or not all(verified_delivery(batch, bug) if bug['id'] in delivered else verified_block(batch, bug)
+                       for bug in bugs)):
+        raise QueueError('本轮修复尚未完整交付或受阻通知未核验，不能结束本轮')
+    if blocked:
+        return {'action': 'complete_round', 'issueId': scan['id'], 'outcome': 'finished_with_blocked',
+                'blockedIssueIds': blocked, 'reason': '固定队列已结束；受阻项保留现场，真人解除后在原任务补完'}
     return {'action': 'complete_round', 'issueId': scan['id'], 'reason': '本轮全部调查与固定修复交付已核验'}
 
 
@@ -280,6 +307,10 @@ def next_action(issues, runs, *, project_id, agent_id, current_issue_id=None, no
             raise QueueError('当前 Bug 与固定批次位置不符')
         if batch.get('state') in ('blocked', 'paused', 'cancelled') or current.get('status') in STOPPED:
             return {'action': 'attention', 'issueId': current['id'], 'reason': '按原修复流程恢复阻塞，不绕过交付门槛或真人暂停'}
+        if verified_block(batch, current):
+            return {'action': 'advance_after_block', 'issueId': current['id'], 'batchId': batch_issue['id'],
+                    'nextIssueId': bug_ids[index] if index < len(bug_ids) else None,
+                    'reason': '受阻通知已回读，按固定顺序接下一项或结束批次，不等待真人解除'}
         return {'action': 'resume_repair', 'issueId': current['id'], 'batchId': batch_issue['id']}
 
     rounds = [issue for issue in issues if meta(issue, 'dailyRound')
