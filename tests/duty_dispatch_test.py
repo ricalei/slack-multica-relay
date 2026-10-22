@@ -218,6 +218,46 @@ class DispatchTests(unittest.TestCase):
         result = self.advance(native)
         self.assertEqual((result['action'], native.starts), ('finalize_round_here', []))
 
+    def test_last_worker_queues_a_successor_while_original_scan_is_exiting(self):
+        data = snapshot([candidate('last', 'excluded')])
+        data['issues'][1]['assignee_id'] = 'agent'
+        data['runs'].append(run('last'))
+        native = FakeNative(data)
+        worker = {**SCOPE, 'current_issue': 'last', 'current_run': 'last-run'}
+        result = self.advance(native, worker)
+        self.assertEqual((result['action'], native.starts), ('finalize_round', ['scan']))
+        self.assertEqual(result['receipts'][0]['runId'], 'new-scan')
+        self.assertEqual(native.data['runs'][0]['status'], 'running')
+        # 旧 scan 的最后一次退出检查发生在后继排队后，只让出，不做第二次汇总。
+        self.assertEqual(self.advance(native)['action'], 'yield_to_finalizer')
+        self.advance(native, worker)
+        self.assertEqual(native.starts, ['scan'])
+        for old in native.data['runs'][:2]:
+            old['status'] = 'completed'
+        native.data['runs'][-1]['status'] = 'running'
+        finalizer = {**SCOPE, 'current_run': 'new-scan'}
+        self.assertEqual(self.advance(native, finalizer)['action'], 'finalize_round_here')
+        self.assertEqual(native.issue('scan')['metadata']['dailyDispatch']['finalizerRunId'], 'new-scan')
+
+    def test_scan_that_already_accepted_finalization_can_be_reused_by_last_worker(self):
+        data = snapshot([candidate('last', 'excluded')])
+        data['issues'][1]['assignee_id'] = 'agent'
+        data['runs'].append(run('last'))
+        native = FakeNative(data)
+        self.assertEqual(self.advance(native)['action'], 'finalize_round_here')
+        result = self.advance(native, {**SCOPE, 'current_issue': 'last', 'current_run': 'last-run'})
+        self.assertEqual(result['receipts'][0]['runId'], 'scan-run')
+        self.assertEqual(native.starts, [])
+
+    def test_expired_or_incomplete_conclusions_are_reinvestigated(self):
+        for row in (candidate('bug', 'confirmed'), suspended()):
+            row['metadata']['dailyInvestigation']['investigationRecord']['evidenceRevision'] = 'old'
+            native = FakeNative(snapshot([row]))
+            with self.subTest(issue=row['id']):
+                result = self.advance(native)
+                self.assertEqual((result['action'], native.starts), ('dispatch', [row['id']]))
+                self.assertEqual(native.issue(row['id'])['metadata']['dailyInvestigation']['state'], 'investigating')
+
     def test_unknown_start_is_recovered_from_real_run_and_not_repeated(self):
         native = FakeNative(snapshot([candidate('first')]))
         native.failure = 'after'

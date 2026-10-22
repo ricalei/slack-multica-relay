@@ -69,6 +69,10 @@ def plan(snapshot, *, round_id, current_issue, current_run, agent_id, project_id
     for row in rows:
         if row.get('project_id') != project_id or row.get('workspace_id') != workspace_id:
             raise Error('本轮调查跨越项目或工作区')
+        item = queue.meta(row, 'dailyInvestigation')
+        if (item.get('schemaVersion') != 1 or item.get('mode') != 'investigate'
+                or item.get('state') not in queue.STATES):
+            raise Error('本轮调查入口协议或状态无效')
     if current_issue != round_id and current_issue not in members:
         raise Error('当前任务不是本轮调查或原扫描')
     for run in active:
@@ -77,8 +81,14 @@ def plan(snapshot, *, round_id, current_issue, current_run, agent_id, project_id
                 or run.get('issue_id') not in {round_id, *members}):
             raise Error('存在本轮之外的活动任务，不能调整全局并发')
     active_ids = [run['issue_id'] for run in active]
-    if len(set(active_ids)) != len(active_ids):
-        raise Error('同一任务存在多个活动运行，停止派发并保留现场')
+    for issue_id in set(active_ids):
+        same_issue = [run for run in active if run['issue_id'] == issue_id]
+        # 原扫描可有一个仍在退出的旧运行和一个已持久排队的汇总后继。
+        successor = (not pending and issue_id == round_id and len(same_issue) == 2
+                     and sum(run['status'] == 'running' for run in same_issue) == 1
+                     and sum(run['status'] in {'queued', 'dispatched'} for run in same_issue) == 1)
+        if len(same_issue) > 1 and not successor:
+            raise Error('同一任务存在多个活动运行，停止派发并保留现场')
     if pending:
         if info.get('investigationComplete') is True or info.get('state') != 'investigating':
             raise Error('尚有未完成调查，不能进入汇总或修复')
@@ -95,6 +105,8 @@ def plan(snapshot, *, round_id, current_issue, current_run, agent_id, project_id
         return {'action': 'dispatch', 'concurrency': 2, 'issueIds': selected,
                 'total': len(rows), 'completed': len(rows) - len(pending), 'remaining': len(pending)}
     if current_issue == round_id:
+        if any(run['issue_id'] == round_id and run['id'] != current_run for run in active):
+            return {'action': 'yield_to_finalizer', 'concurrency': 1}
         return {'action': 'finalize_round_here', 'concurrency': 1, 'total': len(rows),
                 'completed': len(rows), 'remaining': 0}
     return {'action': 'finalize_round', 'concurrency': 1, 'issueIds': [round_id],
@@ -218,13 +230,15 @@ class Native:
         self.call(['issue', 'rerun', issue_id])
 
 
-def launch(native, journal, issue_id, agent_id, runtime_id):
+def launch(native, journal, issue_id, agent_id, runtime_id, *, finalizer=False, accepted_run=None):
     """保存启动前 run 集合；超时后只认实际新 run，未知结果不能重复启动。"""
     history = native.history(issue_id)
     active = [run for run in history if run.get('status') in queue.IN_FLIGHT]
     if any(run.get('agent_id') != agent_id or run.get('runtime_id') != runtime_id for run in active):
         raise Error('目标任务存在其它执行者或 Runtime 的运行')
-    if len(active) > 1:
+    future = [run for run in active if run.get('status') in {'queued', 'dispatched'}
+              or run.get('id') == accepted_run]
+    if len(active) > 1 and not (finalizer and len(active) == 2 and len(future) == 1):
         raise Error('目标任务已有多个活动运行')
     intent = journal.data.get(issue_id)
     if intent:
@@ -239,14 +253,16 @@ def launch(native, journal, issue_id, agent_id, runtime_id):
         if len(found) > 1:
             raise Error('启动 intent 对应多个运行，须核对后恢复')
         raise Error('已有启动 intent 尚无可确认的新运行，不能重复启动')
-    if active:
-        return {'issueId': issue_id, 'runId': active[0]['id'], 'status': active[0]['status'], 'reused': True}
+    reusable = future if finalizer else active
+    if reusable:
+        return {'issueId': issue_id, 'runId': reusable[0]['id'], 'status': reusable[0]['status'], 'reused': True}
     row = native.issue(issue_id)
     if row.get('status') in queue.STOPPED or row.get('assignee_id') not in (None, agent_id):
         raise Error('目标已关闭或转交，不能启动')
     if row.get('assignee_id') is None:
         native.assign_without_start(issue_id)
-    # 归属写入后再保存 run 集合；--no-start 不等于已有启动回执。
+    # 仅汇总可在旧 scan 仍执行时排一个后继。原生 rerun 保留 executing run，
+    # 后继受服务端同 issue 串行约束；复用未经接管确认的旧 run 会丢掉退出窗口内的请求。
     intent = {'beforeRunIds': [run['id'] for run in native.history(issue_id)]}
     journal.data[issue_id] = intent
     journal.save()
@@ -271,17 +287,26 @@ def advance(native, journal, scope):
     if result['action'] == 'register_round':
         return result
     native.concurrency(result['concurrency'])
+    if result['action'] == 'finalize_round_here':
+        native.metadata(scope['round_id'], 'dailyDispatch', {
+            'schemaVersion': 1, 'phase': 'finalizing', 'finalizerRunId': scope['current_run']})
     receipts, errors = [], []
     for issue_id in result.get('issueIds', []):
         try:
             row = native.issue(issue_id)
             if result['action'] == 'dispatch':
                 item = queue.meta(row, 'dailyInvestigation')
-                if item.get('roundId') != scope['round_id'] or item.get('state') not in {'ready', 'investigating'}:
-                    raise Error('所选调查现场已改变，请重新读取')
+                scan = next(r for r in snapshot['issues'] if r['id'] == scope['round_id'])
+                refreshed = [row if r['id'] == issue_id else r for r in snapshot['issues']]
+                _, still_pending = queue.round_candidates(scan, refreshed, scope['agent_id'])
+                if issue_id not in {r['id'] for r in still_pending}:
+                    continue
                 if issue_id not in journal.data:
                     native.metadata(issue_id, 'dailyInvestigation', {**item, 'state': 'investigating'})
-            receipts.append(launch(native, journal, issue_id, scope['agent_id'], scope['runtime_id']))
+            finalizer = result['action'] == 'finalize_round'
+            accepted = queue.meta(row, 'dailyDispatch').get('finalizerRunId') if finalizer else None
+            receipts.append(launch(native, journal, issue_id, scope['agent_id'], scope['runtime_id'],
+                                   finalizer=finalizer, accepted_run=accepted))
         except Error as error:
             errors.append({'issueId': issue_id, 'reason': str(error)})
     # 调查运行不会写这个共享字段；每次按完整事实重算，避免并发计数丢失。

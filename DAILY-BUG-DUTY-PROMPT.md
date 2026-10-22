@@ -142,7 +142,7 @@ Multica 任务操作一律用原生 CLI：先看帮助，核对服务、GRM 工�
 
 ### 调查并发协议
 
-新协议固定流程为：采集与完整登记（并发 1）→ 调查（最多 2）→ 原扫描统一汇总（并发 1）→ 原固定修复队列（并发 1）。只有以下调度器能调整本 Agent 的 `max_concurrent_tasks` 和启动本轮调查或原扫描；调查运行不手工 assign/rerun，不增建 Agent。
+新协议固定流程为：采集与完整登记（并发 1）→ 调查（最多 2）→ 原扫描统一汇总（并发 1）→ 原固定修复队列（并发 1）。并发调查使用各自独立的 worktree、报告目录、浏览器 tab 和测试数据；涉及共享测试资源时先核对归属，不覆盖另一调查的环境或证据。只有以下调度器能调整本 Agent 的 `max_concurrent_tasks` 和启动本轮调查或原扫描；调查运行不手工 assign/rerun，不增建 Agent。
 
 从新轮次 `dailyExecution.schedulerRevision` 精确 fetch/show `scripts/duty-dispatch.py` 与 `scripts/duty-queue.py`，导出到同一临时目录。完整登记、三源覆盖回读后，原扫描调用一次 `advance`；每条调查开工先调用 `plan` 核对身份和真实 run，结论与报告保存并回读后调用 `advance`。实际参数来自原生 CLI 回读的当前 Issue/run 与原扫描，不凭标题猜测：
 
@@ -156,9 +156,9 @@ python3 <同一临时目录>/duty-dispatch.py advance \
   --round-id <原扫描 UUID> --current-issue <当前 Issue UUID> --current-run <当前真实 run UUID>
 ```
 
-`plan` 与 `advance` 返回 protocolVersion=1；前者只读规划，后者带真实原生写入与回读。`register_round` 留在原扫描完成登记；`dispatch` 已补足最多两个未结束调查名额，核对 receipts 后结束当前运行，不占着名额等待其它调查。已留有效结论但尚在退出的 run 不占逻辑调查名额，实际运行总量仍受 Runtime 并发上限 2 控制。调查任务只写自身过程、报告与结论；不写父扫描的 dailyRound、dailyBatch、dailyDispatch、最终分类索引、台账或 Slack 汇总，所有共享调度由同 Runtime 的短锁串行执行。
+`plan` 与 `advance` 返回 protocolVersion=1。**开工 plan 只读核对，不派发、没有 receipts；返回 dispatch 表示仍在调查阶段，当前调查继续处理自身候选，不能因此退出或执行预览中的其它候选。当前候选已有有效结论时复用结果，直接 advance。**只有交接 advance 才执行真实写入并返回 receipts；下列“已派发/结束运行”都仅指 advance。`register_round` 留在原扫描完成登记；`dispatch` 已补足最多两个未结束调查名额，核对 receipts 后结束当前运行，不占着名额等待其它调查。已留有效结论但尚在退出的 run 不占逻辑调查名额，实际运行总量仍受 Runtime 并发上限 2 控制。调查任务只写自身过程、报告与结论；不写父扫描的 dailyRound、dailyBatch、dailyDispatch、最终分类索引、台账或 Slack 汇总，所有共享调度由同 Runtime 的短锁串行执行。
 
-`finalize_round` 已先把并发恢复为 1，再为原扫描创建或复用唯一汇总运行；当前调查结束释放名额，不自行汇总或建修复队列。`finalize_round_here` 只允许原扫描执行：确认全部候选证据与结论，统一生成、上传并回读完整索引、分类台账与扫描汇总，再按原只读计划器进入固定修复流程。原扫描每次准备退出前重新调用 `advance`，收到 finalize_round_here 就在当前运行收尾，不能把已经就绪的汇总留给人工重启。
+`finalize_round` 已先把并发恢复为 1，再为原扫描创建或复用唯一汇总运行；原扫描仍在退出但尚未确认接管汇总时，调度器用原生 rerun 排入一个后继，保留旧运行并由服务端同 Issue 串行执行，不能把旧活动 run 当作汇总回执。当前调查结束释放名额，不自行汇总或建修复队列。`finalize_round_here` 只允许原扫描执行：确认全部候选证据与结论，统一生成、上传并回读完整索引、分类台账与扫描汇总，再按原只读计划器进入固定修复流程。原扫描每次准备退出前重新调用 `advance`，收到 finalize_round_here 就在当前运行收尾；调度器已保存当前 run 的汇总接管回执。收到 yield_to_finalizer 则已有唯一后继排队，当前运行直接退出，避免两次汇总。不能把已经就绪的汇总留给人工重启。
 
 调度器在 `~/.config/moego/daily-bug-duty/dispatch/` 保存共享锁与每轮启动 journal，不能复制到工作树或清除未收尾 intent。启动结果不明先按调用前后真实 run ID 差集核对；未知未证实、真实失败或报告缺口返回 attention/非零退出，保留现场与具体恢复动作，不重发启动、不归为外部缺证，也不宣称全轮完成。禁止手工绕过锁，禁止调查运行提前进入修复。修复前必须确认 Agent 并发已回读为 1，且不存在其它调查运行；其后完全沿用原第 2、3 节。
 
