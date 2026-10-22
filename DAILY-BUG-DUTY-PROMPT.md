@@ -361,9 +361,10 @@ Winches（核对作者为审查人 Multica 用户）在已交付 Bug 任务中�
 
 ## 看板字段台账
 
-每日值守看板只读取台账任务「每日 Bug 值守看板｜字段台账」（GRM-664，`01a139d1-918a-741c-93ad-29b7d5a1c6b0`）中的记录，不读取 dailyBatch、dailyBug 或 dailyScan。台账任务无人指派，在其下评论不会唤醒 Agent；不在其它任务上新增看板 metadata，任务 metadata 总量上限为 8KB。
+每日值守看板在 10:00 只读生成当时的阶段快照：采集数量与覆盖来自 dailyScan，调查完成数与结论来自固定清单内逐条报告，修复完成数来自 dailyBatch/dailyBug 的对应版本完整交付回执，当前处理来自真实 run；最终分类、PR、回告仍复用台账任务「每日 Bug 值守看板｜字段台账」（GRM-664，`01a139d1-918a-741c-93ad-29b7d5a1c6b0`）。最终台账尚未登记时也展示已有阶段事实，不能把调查中或修复中写成未扫描。台账任务无人指派，在其下评论不会唤醒 Agent；不在其它任务上新增看板 metadata，任务 metadata 总量上限为 8KB。
 
 - 写法：在台账任务追加顶层评论，首行 `<!-- duty-board:v1 -->`，再写一句说明和一个 ```json 代码块，内容为单个对象或同一次写入的对象数组。字段变化时追加完整新记录，不修改或删除旧评论；看板按任务与记录类型（kind）各取最新一条，同一 Bug 的 bug 与 notify 记录互不覆盖。写后用 `issue comment list` 回读，确认 JSON 可解析且字段一致。
+- 阶段留档：原扫描在采集与初筛完成后立即保存现有 dailyScan 的 targetDate、sources、collected、coverageComplete、counts 与索引回执，不能等全部调查后才保存采集事实。每条调查和修复按现有协议及时保存自身证据、结论和真实交付回执；新协议调查运行仍只写自身结果，不为看板并发更新父扫描的共享字段。看板自行只读推导阶段进度，不新增等待看板、额外采集或业务状态迁移；当前轮继续使用自己的固定调度版本。
 - 扫描记录：每次 scan 结束（含零项合格、缺源）写入 `{"issue":"<扫描任务编号>","kind":"scan","feedbackDate":"<上海目标反馈日>","coverageComplete":true|false,"collected":{"canny":n,"facebook":n,"intercom":n},"nonBug":n,"productDecision":n,"csFollowed":n,"suspected":n,"outcomes":{"confirmed":n,"duplicate":n,"verificationBlocked":n,"excludedAfterInvestigation":n}}`；一次 scan 覆盖多个反馈日时每日一条，outcomes 为本次扫描结束时的状态。
 - Bug 记录：每个确认可修的 Bug 建任务后立即写入 `{"issue":"<Bug 任务编号>","kind":"bug","feedbackDate":"<原反馈创建的上海日期>","source":"canny|facebook|intercom","sourceUrl":"<原反馈链接>","candidateId":"<候选 ID>","prs":[],"delivery":null}`，只登记未启动的 Bug 也要写。PR 创建或增减、首次 Slack 交付后，追加该 Bug 的完整新记录：`prs` 为全部 PR 链接，`delivery` 为 `{"permalink":"<该 Bug Slack 交付 thread 根消息链接>"}`。
 - 分类口径，每条采集记录只计一次：collected 合计 = nonBug + productDecision + csFollowed + suspected。nonBug 指不描述既有功能异常的记录（咨询、闲聊、操作或账务请求等）；productDecision 指新增能力或需要产品取舍的诉求；csFollowed 指按已有工单跟进规则跳过的记录；suspected 指描述既有功能异常、进入 Bug 调查的记录，等于 confirmed + duplicate + verificationBlocked + excludedAfterInvestigation。新流程最终 verificationBlocked 只计已充分调查但真正缺外部材料的记录；未调查项不得写成最终分类。Bug 按原反馈日归属，不按发现它的扫描日。

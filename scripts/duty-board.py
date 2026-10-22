@@ -2,6 +2,7 @@
 """Build the daily Bug duty board from Multica, GitHub and Slack (read-only)."""
 import argparse
 import datetime as dt
+import importlib.util
 import json
 import os
 import re
@@ -13,7 +14,13 @@ from html import escape
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+spec = importlib.util.spec_from_file_location('duty_progress', Path(__file__).with_name('duty-progress.py'))
+progress_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(progress_module)
+
 TZ = ZoneInfo('Asia/Shanghai')
+MULTICA_CLI = ['multica', '--server-url', 'https://multica.devops.moego.dev',
+               '--workspace-id', '1b6d114a-8407-4ba8-adea-d31209caabe5']
 REJECT_EMOJI = 'no_entry_sign'
 REJECT_PREFIXES = ('🚫', ':no_entry_sign:')
 PR_URL = re.compile(r'https://github\.com/([^/]+/[^/]+)/pull/(\d+)')
@@ -215,7 +222,15 @@ def build_board(scans, bugs, start, today):
             'suspectedEstimated': bool(scan and scan.get('suspectedEstimated')),
             'coverageComplete': scan.get('coverageComplete') if scan else None,
             **_layers([bug for bug in bugs if bug['feedbackDate'] == key]),
+            'progress': scan.get('progress') if scan else None,
         })
+        # 已确认但尚未登记 Bug 的调查也属于阶段结论；建任务后按调查 ID 去重。
+        confirmed = ((scan or {}).get('progress') or {}).get('investigation', {}).get('confirmedIssueIds', [])
+        detailed = {bug.get('investigationIssueId') for bug in bugs if bug['feedbackDate'] == key}
+        extra = len(set(confirmed) - detailed)
+        rows[-1]['confirmedWithoutDetail'] = extra
+        rows[-1]['confirmed'] += extra
+        rows[-1]['shouldShip'] += extra
         day += dt.timedelta(days=1)
     # 扫描晚于看板或当日扫描失败时该反馈日未扫描；累计只合计已扫描的反馈日并注明排除项，
     # 避免一天未扫描就让整列累计显示缺失。已扫描但台账缺字段仍按缺失处理。
@@ -228,6 +243,9 @@ def build_board(scans, bugs, start, today):
     total = {'label': f'累计（d1–d{len(rows)}{excluded}）', 'collected': total_of('collected'),
              'suspected': total_of('suspected'), 'suspectedEstimated': any(row['suspectedEstimated'] for row in rows),
              'unscanned': unscanned, 'scopeNote': excluded, **_layers(bugs)}
+    extra = sum(row['confirmedWithoutDetail'] for row in rows)
+    total.update(confirmed=total['confirmed'] + extra, shouldShip=total['shouldShip'] + extra,
+                 confirmedWithoutDetail=extra)
     warnings = [warning for scan in latest_scan.values() for warning in scan_warnings(scan)]
     return {'start': start.isoformat(), 'through': yesterday.isoformat(), 'rows': rows, 'trial': None,
             'total': total, 'bugs': sorted(bugs, key=lambda bug: (bug['feedbackDate'], bug['identifier'])),
@@ -337,11 +355,56 @@ def bug_status_text(bug):
     return state
 
 
+def progress_rows(progress):
+    """三种输出共享同一阶段文案；完整交付只计经过调度器回执校验的版本。"""
+    collected, inv, fix = (progress[key] for key in ('collection', 'investigation', 'repair'))
+    source = '、'.join(f'{key.capitalize()} {value}' for key, value in (collected.get('collected') or {}).items())
+    collection_text = {'completed': f"已完成 {_num(collected.get('total'))} 条（{source}）",
+                       'collecting': '采集或覆盖核对进行中', 'incomplete': '来源覆盖不完整，保留已采集结果',
+                       'attention': '阶段数据待核对'}[collected['state']]
+    if inv['state'] in {'investigating', 'completed'}:
+        inv_text = (f"已留档 {inv['completed']}/{inv['total']} 个问题 · 确认可修 {inv['confirmed']}"
+                    f" · 重复 {inv['duplicate']} · 已有工单 {inv['csFollowed']} · 排除 {inv['excluded']}")
+    else:
+        inv_text = {'registering': '本轮清单登记中', 'legacy': '历史记录未保存逐条调查进度',
+                    'attention': '证据或清单待核对，完成数未知'}[inv['state']]
+    if fix['state'] in {'repairing', 'completed', 'completed_with_skips', 'blocked', 'paused', 'cancelled'}:
+        fix_text = f"完整交付 {fix['completed']}/{fix['total']}"
+        if fix['state'] == 'repairing':
+            fix_text += f" · 固定队列第 {fix.get('index')}/{fix['total']} 项"
+        elif fix['state'] == 'completed_with_skips':
+            fix_text += ' · 已结束，含真人授权跳过项'
+        elif fix['state'] == 'completed':
+            fix_text += ' · 工程交付已结束'
+        else:
+            fix_text += ' · ' + {'blocked': '修复受阻，详见当前任务', 'paused': '已暂停', 'cancelled': '已取消'}[fix['state']]
+    else:
+        fix_text = {'not_started': '尚未开始，等待全轮调查与汇总', 'preparing': '固定修复清单登记中',
+                    'not_needed': '本轮无新增可修项', 'attention': '交付证据或暂停现场待核对'}[fix['state']]
+    return [('采集', collection_text), ('调查', inv_text), ('修复', fix_text)]
+
+
+def progress_lines(progress):
+    lines = [f'- **{label}**：{text}' for label, text in progress_rows(progress)]
+    active = []
+    for item in progress['current']:
+        status = '执行中' if item['status'] in {'running', 'waiting_local_directory'} else '已排队'
+        summary = item['summary'].replace('\n', ' ').replace('@', '＠')
+        for token in ('\\', '[', ']', '*', '_', '<', '>'):
+            summary = summary.replace(token, '\\' + token)
+        active.append(f"{item['phase']}{status} [{item['identifier']}]({item['url']}) {summary}")
+    current = '；'.join(active) or ('暂无在途运行' if progress['activityKnown'] else '运行状态读取失败，待核对')
+    return lines + [f'- **当前处理**：{current}', f"- **下一步**：{progress['nextAction']}"]
+
+
 def render_markdown(board, now):
     header = FUNNEL_HEADER
     lines = [f"## 每日 Bug 值守看板｜截至 {board['through']} 反馈日", '',
-             f"生成时间：{now.astimezone(TZ):%Y-%m-%d %H:%M}（Asia/Shanghai）。按所属扫描批次归组，d1 反馈日 = {board['start']}。", '',
-             '### 漏斗', '', '| ' + ' | '.join(header) + ' |', '|' + '---|' * len(header)]
+             f"生成时间：{now.astimezone(TZ):%Y-%m-%d %H:%M}（Asia/Shanghai）。按所属扫描批次归组，d1 反馈日 = {board['start']}。", '']
+    progress = (board['rows'] or [{}])[-1].get('progress')
+    if progress:
+        lines += ['### 阶段结论与当前进度', ''] + progress_lines(progress) + ['']
+    lines += ['### 漏斗', '', '| ' + ' | '.join(header) + ' |', '|' + '---|' * len(header)]
     def row_line(row, bold=False):
         cells = funnel_cells(board, row)
         if bold:
@@ -400,7 +463,11 @@ def render_slack(board, now, board_link=None):
     lines = [f"**📊 每日 Bug 值守看板｜截至 {board['through'][5:]}**", '']
     if last:
         lines += [f"**{last['label']}**：" + (intake(last) if last['scanned'] else '未扫描'), '']
-    lines.append(f"**Bug 现状**（范围内共 {len(board['bugs'])} 个）")
+        if last.get('progress'):
+            lines += progress_lines(last['progress']) + ['']
+    lines.append(f"**Bug 现状**（已进入看板 {len(board['bugs'])} 个）")
+    if board['total'].get('confirmedWithoutDetail'):
+        lines.append(f"- 已确认待进入修复明细 {board['total']['confirmedWithoutDetail']} 个，进度见本轮阶段快照")
     lines += status_lines(board, now) or ['- 暂无']
     items = attention(board, now)
     for key in ('notify', 'responded'):
@@ -423,18 +490,33 @@ def render_slack(board, now, board_link=None):
 # ---------- 数据读取 ----------
 
 def run_json(command):
-    return json.loads(subprocess.run(command, check=True, capture_output=True, text=True).stdout)
+    return json.loads(subprocess.run(multica_command(command), check=True, capture_output=True, text=True).stdout)
+
+
+def multica_command(command):
+    return MULTICA_CLI + command[1:] if command and command[0] == 'multica' else command
 
 
 def load_issues(project):
-    issues, offset = [], 0
+    issues, offset, total = [], 0, None
     while True:
         page = run_json(['multica', 'issue', 'list', '--project', project, '--limit', '100',
-                         '--offset', str(offset), '--output', 'json'])
-        issues += page['issues']
-        if not page.get('has_more'):
+                         '--offset', str(offset), '--sort', 'created_at', '--direction', 'asc', '--output', 'json'])
+        rows = page.get('issues')
+        if (not isinstance(rows, list) or type(page.get('has_more')) is not bool
+                or type(page.get('total')) is not int or page.get('offset') != offset):
+            raise ValueError('项目任务分页不完整，不能生成阶段快照')
+        total = page['total'] if total is None else total
+        if page['total'] != total:
+            raise ValueError('读取期间任务数量变化，请重新生成快照')
+        issues.extend(rows)
+        if not page['has_more']:
+            if len(issues) != total or len({row['id'] for row in issues}) != total:
+                raise ValueError('项目任务总数或身份不闭合')
             return issues
-        offset += len(page['issues'])
+        if not rows:
+            raise ValueError('项目任务分页未推进')
+        offset += len(rows)
 
 
 def _meta(issue, key):
@@ -531,6 +613,15 @@ def collect(args, now):
     ledger, warnings = ledger_entries(run_json(['multica', 'issue', 'comment', 'list', args.ledger_issue,
                                                 '--full', '--compact', '--output', 'json']))
     issues = load_issues(args.project)
+    runs = []
+    if any(_meta(issue, 'dailyRound') for issue in issues):
+        try:
+            runs = run_json(['multica', 'agent', 'tasks', getattr(args, 'duty_agent',
+                            '387e0620-8a22-44f5-919c-4a3e6296fcfb'), '--output', 'json'])
+            if not isinstance(runs, list):
+                raise ValueError('运行列表无效')
+        except (subprocess.CalledProcessError, ValueError, OSError):
+            runs = None
     issues_by_id = {issue['id']: issue for issue in issues}
     through = (dt.date.fromisoformat(args.today) if args.today else now.astimezone(TZ).date()) - dt.timedelta(days=1)
     for issue in issues:
@@ -548,16 +639,42 @@ def collect(args, now):
             if not start.isoformat() <= cohort['feedbackDate'] <= through.isoformat():
                 continue
         board = ledger.get((issue['identifier'], 'bug' if is_bug else 'scan'))
+        if is_scan and not is_bug:
+            data = _meta(issue, 'dailyScan') or {}
+            feedback = data.get('targetDate') or (board or {}).get('feedbackDate')
+            if not feedback or not start.isoformat() <= feedback <= through.isoformat():
+                continue
+            if board and board.get('feedbackDate') != feedback:
+                warnings.append(f"{issue['identifier']} 台账反馈日与原扫描不一致，采用原扫描阶段事实")
+                board = None
+            counts = data.get('counts') or {}
+            record = {**(board or {}), 'identifier': issue['identifier'], 'feedbackDate': feedback,
+                      'createdAt': issue['created_at'], 'scanDate': scan_date(issue)}
+            # 采集事实先于最终台账存在；逐阶段展示，不把“尚未汇总”误判为“未扫描”。
+            if data.get('collected') is not None:
+                values = data['collected']
+                record['collected'] = values if (isinstance(values, dict) and
+                    all(progress_module.count(value) for value in values.values())) else None
+            record['coverageComplete'] = data.get('coverageComplete', record.get('coverageComplete'))
+            for key in SCAN_SPLIT:
+                if progress_module.count(counts.get(key)):
+                    record[key] = counts[key]
+            if _meta(issue, 'dailyRound'):
+                record['progress'] = progress_module.snapshot(issue, issues, runs, now, args.issue_url_base)
+                record['collected'] = (record['progress']['collection'].get('collected')
+                                       if record['progress']['collection'].get('total') is not None else None)
+                warnings.extend(record['progress']['warnings'])
+            elif board is None:
+                warnings.append(f"{issue['identifier']} 已有采集记录，最终分类或调查进度尚未登记")
+            scans.append(record)
+            continue
         if board is None:
             warnings.append(f"{issue['identifier']} 在字段台账中没有记录，未计入看板")
-            continue
-        if not is_bug:
-            scans.append({**board, 'identifier': issue['identifier'],
-                          'createdAt': issue['created_at'], 'scanDate': scan_date(issue)})
             continue
         bug = {'identifier': issue['identifier'], 'url': args.issue_url_base + issue['identifier'],
                'summary': issue['title'].split('｜')[-1], 'feedbackDate': cohort['feedbackDate'], 'scanDate': cohort['scanDate'],
                'batch': cohort['batch'], 'sourceFeedbackDate': board.get('feedbackDate'),
+               'investigationIssueId': (_meta(issue, 'dailyBug') or {}).get('investigationIssueId'),
                'source': board.get('source'), 'sourceUrl': board.get('sourceUrl'),
                'deliveryPermalink': (board.get('delivery') or {}).get('permalink'), 'rejection': None, 'notify': None}
         bug['prs'] = [github.pr(url) for url in board.get('prs') or []]
@@ -660,7 +777,7 @@ def load_scan_index(identifier):
             name = attachment.get('filename') or ''
             if name != SCAN_INDEX_NAME and not name.endswith('.zip'):
                 continue
-            subprocess.run(['multica', 'attachment', 'download', attachment['id'], '-o', directory],
+            subprocess.run(multica_command(['multica', 'attachment', 'download', attachment['id'], '-o', directory]),
                            check=True, capture_output=True, text=True)
             index = read_scan_index(Path(directory) / name)
             if index is not None:
@@ -904,9 +1021,25 @@ def _html_records(payload):
 def _html_view(payload):
     """单个反馈日的完整视图；所有动态文本仍经静态渲染转义。"""
     return (_html_top(payload) + '<main><div class="wrap"><div class="grid">' + _html_funnel(payload)
-            + _html_todo(payload) + '</div>' + _html_bugs(payload) + _html_trend(payload) + _html_records(payload)
+            + _html_todo(payload) + '</div>' + _html_progress(payload) + _html_bugs(payload)
+            + _html_trend(payload) + _html_records(payload)
             + '<footer>已上线：关联 PR 全部 merged；确认可修按所属扫描批次统计，后续方案驳回仍计入。'
             '不上线：尚未全部合并且审查人在交付 thread 上点 🚫。</footer></div></main>')
+
+
+def _html_progress(payload):
+    progress = (payload['rows'] or [{}])[-1].get('progress')
+    if not progress:
+        return ''
+    stages = ''.join(f'<div><h3>{_h(label)}</h3><p>{_h(text)}</p></div>'
+                     for label, text in progress_rows(progress))
+    current = '；'.join(
+        _h(item['phase'] + ('执行中' if item['status'] in {'running', 'waiting_local_directory'} else '已排队'))
+        + ' ' + _a(item['identifier'], item['url']) + ' ' + _h(item['summary']) for item in progress['current'])
+    current = current or ('暂无在途运行' if progress['activityKnown'] else '运行状态读取失败，待核对')
+    return ('<section class="widget full"><div class="head"><h2>阶段结论与当前进度</h2>'
+            f'<p>截至 {_h(payload["generatedAt"])}</p></div><div class="phase-cards">{stages}</div>'
+            f'<p><b>当前处理：</b>{current}</p><p><b>下一步：</b>{_h(progress["nextAction"])}</p></section>')
 
 
 def render_html(payload, date_payloads=None):
@@ -952,6 +1085,9 @@ main{padding:22px 0 56px}
 .grid{display:grid;grid-template-columns:minmax(0,1.75fr) minmax(0,1fr);gap:18px;align-items:start}
 .widget{background:var(--white);border:1px solid var(--line);border-radius:6px;padding:20px 22px 18px;min-width:0}
 .full{margin-top:18px}
+.phase-cards{display:flex;flex-wrap:wrap;gap:12px;margin:16px 0}
+.phase-cards>div{flex:1 1 220px;padding:12px 14px;background:var(--page);border-radius:4px}
+.phase-cards h3{font-size:13px;margin:0 0 6px}.phase-cards p{margin:0;color:var(--muted)}
 .head{display:flex;justify-content:space-between;align-items:baseline;gap:12px}
 .head h2{font-size:17px;margin:0;font-weight:600}.head p{margin:0;color:var(--muted);font-size:12px}
 .empty{color:var(--muted);margin:14px 0 0}
@@ -1077,6 +1213,9 @@ __BODY__
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--project', required=True, help='每日 Bug 值守项目 ID')
+    parser.add_argument('--server-url', default='https://multica.devops.moego.dev')
+    parser.add_argument('--workspace-id', default='1b6d114a-8407-4ba8-adea-d31209caabe5')
+    parser.add_argument('--duty-agent', default='387e0620-8a22-44f5-919c-4a3e6296fcfb', help='值守 Agent 的真实运行来源')
     parser.add_argument('--ledger-issue', required=True, help='看板字段台账任务 ID 或编号')
     parser.add_argument('--start', required=True, help='d1 对应的反馈日（YYYY-MM-DD）')
     parser.add_argument('--today', help='Asia/Shanghai 当天日期，默认取当前时间')
@@ -1092,6 +1231,7 @@ def main(argv=None):
     parser.add_argument('--scan-index', help='截至日扫描任务的证据索引（scan-evidence-index.json 或含它的证据 zip）；'
                                              '不传时脚本自行从扫描任务附件下载')
     args = parser.parse_args(argv)
+    MULTICA_CLI[:] = ['multica', '--server-url', args.server_url, '--workspace-id', args.workspace_id]
     now = dt.datetime.now(dt.timezone.utc)
     today = dt.date.fromisoformat(args.today) if args.today else now.astimezone(TZ).date()
     scans, bugs, warnings = collect(args, now)

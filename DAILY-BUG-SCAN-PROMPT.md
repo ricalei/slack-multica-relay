@@ -14,6 +14,8 @@ schedulerRevision=<调度器提交 SHA>
 2. 按实际运行时间计算 Asia/Shanghai 前一个完整自然日。每来源首次只采昨天，后续从该来源最后成功日期的次日补到昨天；成功覆盖的窗口复用，失败只补缺失来源。任务标题的 UTC 日期不代替反馈窗口。
 3. 使用已合并稳定的 moe-feedback-collector SKILL.md 与 collect-daily CLI，沿用 DAILY_BUG_COLLECTOR_SCRIPT、DAILY_BUG_OUTPUT_ROOT 和 Canny account-ref 协议。独立采集 Canny、Facebook、Intercom，各业务均覆盖；不从 CS 起采，不扩大为历史扫描。Facebook、Intercom 已成功日期与 run 不重复采集。
 
+采集与初筛完成后立即保存现有 dailyScan 的来源覆盖、数量、初筛分类和 scan-evidence-index.json 回执，供 10:00 看板读取阶段快照；调查和修复仍按原协议分别留档，最终扫描台账待全轮调查结束统一写入。阶段展示不推进队列，也不把当前轮迁移到新调度版本。
+
 ## 本轮全部调查完成门槛
 
 1. 初筛、归并和查重后固定本轮疑似 Bug 清单，上传并核对真实附件，保存 dailyRound 的候选数量、身份集合摘要和候选清单回执。只登记本轮反馈，不导入旧 pending-candidates、旧 needs_evidence 或历史调查队列；用户已停止的历史任务不恢复。

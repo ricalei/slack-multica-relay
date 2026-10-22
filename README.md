@@ -106,11 +106,13 @@ python3 scripts/duty-queue.py \
 
 隔离验证可传 `--snapshot <脱敏 JSON>`，输入为 `{"issues": [...], "runs": [...]}`，不访问服务。定向检查为 `python3 -m unittest tests/duty_queue_test.py`。
 
-线上同步先创建流程 PR，再按 AGENTS.md 核对线上 instructions 和 Autopilot description，仅更新对应字段及扫描的 03:00 Asia/Shanghai 定时。Prompt 中的 `<调度器提交 SHA>` 绑定本 PR 已推送并回读的完整提交 SHA，运行时精确 fetch/show 此版本，避免 PR 尚未合入时误用旧 origin/main 调度器；后续改动同步时重新绑定版本。发布时保留值守并发 1、Runtime、模型与环境；新轮仅由调查调度器在调查阶段切换为 2，汇总前恢复为 1。看板配置不变。配置回读不等同于真实每日周期完成，不为验证配置擅自触发新采集。
+线上同步先创建流程 PR，再按 AGENTS.md 核对线上 instructions 和 Autopilot description，仅更新对应字段及扫描的 03:00 Asia/Shanghai 定时。Prompt 中的 `<调度器提交 SHA>` 绑定本 PR 已推送并回读的完整提交 SHA，运行时精确 fetch/show 此版本，避免 PR 尚未合入时误用旧 origin/main 调度器；后续改动同步时重新绑定版本。发布时保留值守并发 1、Runtime、模型与环境；新轮仅由调查调度器在调查阶段切换为 2，汇总前恢复为 1。看板仍为 10:00 阶段快照。配置回读不等同于真实每日周期完成，不为验证配置擅自触发新采集。
 
 ## 每日值守看板
 
-`scripts/duty-board.py` 只读汇总「GRM 每日 Bug 值守」的扫描批次漏斗：读取值守项目任务、字段台账任务 GRM-664 的 `<!-- duty-board:v1 -->` 评论、GitHub PR 的合并状态、Slack 交付 thread 上审查人的 🚫，以及下节的回告记录与回应跟踪，输出 `board.json`、`board.md`、`slack.md`，以及可直接打开、支持切换反馈日期的 `board.html`。「GRM 每日值守看板」Agent（Prompt 真源 [DUTY-BOARD-PROMPT.md](DUTY-BOARD-PROMPT.md)）由 Autopilot 每天 10:00 运行 `origin/main` 版本，发送到指定交付频道、在该消息 thread 上传 `board.html`，并追加到 GRM-665。本地预览：
+看板每天 10:00 输出当时快照，不等待全轮调查或修复结束。`scripts/duty-progress.py` 复用 `duty-queue.py` 的固定清单、报告版本和完整交付门槛，只读推导采集、调查、修复三个阶段；缺最终台账时仍展示已采集事实与现有进度，数据缺失或运行查询失败明确标为待核对，不记成零或未扫描。确认项在登记 Bug 前后按调查 ID 去重；PR 存在不计为完整修复交付。三个脚本运行时须从同一发布 SHA 导出到同一目录。
+
+`scripts/duty-board.py` 只读汇总「GRM 每日 Bug 值守」的扫描批次漏斗：读取值守项目任务、字段台账任务 GRM-664 的 `<!-- duty-board:v1 -->` 评论、GitHub PR 的合并状态、Slack 交付 thread 上审查人的 🚫，以及下节的回告记录与回应跟踪，输出 `board.json`、`board.md`、`slack.md`，以及可直接打开、支持切换反馈日期的 `board.html`。「GRM 每日值守看板」Agent（Prompt 真源 [DUTY-BOARD-PROMPT.md](DUTY-BOARD-PROMPT.md)）由 Autopilot（入口真源 [DUTY-BOARD-AUTOPILOT-PROMPT.md](DUTY-BOARD-AUTOPILOT-PROMPT.md)）每天 10:00 运行 `origin/main` 版本，发送到指定交付频道、在该消息 thread 上传 `board.html`，并追加到 GRM-665。本地预览：
 
 ```bash
 python3 scripts/duty-board.py --project <值守项目 ID> --ledger-issue GRM-664 --start 2026-10-12 --reviewer <审查人 Slack 用户 ID> --canny-account-ref <Canny 内部测试账号 aid> --output-dir <输出目录>
