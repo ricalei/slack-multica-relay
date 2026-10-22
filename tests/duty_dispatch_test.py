@@ -64,6 +64,10 @@ class FakeNative:
     def assign_without_start(self, key):
         next(row for row in self.data['issues'] if row['id'] == key)['assignee_id'] = 'agent'
 
+    def status(self, key, value):
+        self.writes.append((key, 'status'))
+        next(row for row in self.data['issues'] if row['id'] == key)['status'] = value
+
     def rerun(self, key):
         self.starts.append(key)
         if self.failure != 'before':
@@ -244,17 +248,18 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(dispatch.queue.next_action(data['issues'], data['runs'], **serial)['action'],
                          'prepare_round_repair')
 
-    def test_original_scan_with_draining_worker_exits_and_worker_queues_the_finalizer(self):
+    def test_original_scan_with_draining_worker_queues_one_successor_and_exits(self):
         data = snapshot([candidate('last', 'excluded')])
         data['issues'][1]['assignee_id'] = 'agent'
         data['runs'].append(run('last'))
         native = FakeNative(data)
-        self.assertEqual((self.advance(native)['action'], native.starts), ('yield_to_members', []))
-        self.assertNotIn('dailyDispatch', native.issue('scan')['metadata'])
-        worker = {**SCOPE, 'current_issue': 'last', 'current_run': 'last-run'}
-        result = self.advance(native, worker)
+        result = self.advance(native)
         self.assertEqual((result['action'], native.starts), ('finalize_round', ['scan']))
+        self.assertNotIn('dailyDispatch', native.issue('scan')['metadata'])
         self.assertEqual(self.advance(native)['action'], 'yield_to_finalizer')
+        worker = {**SCOPE, 'current_issue': 'last', 'current_run': 'last-run'}
+        self.advance(native, worker)
+        self.assertEqual(native.starts, ['scan'])
 
     def test_expired_or_incomplete_conclusions_are_reinvestigated(self):
         for row in (candidate('bug', 'confirmed'), suspended()):
@@ -389,10 +394,23 @@ class LaneDispatchTests(unittest.TestCase):
         idle = self.advance(native)
         self.assertEqual((idle['action'], idle['claims'], idle['issueIds']), ('dispatch', [], []))
         scope = self.finish(native, 2, 'b', 'confirmed')
-        # 结论已留档但工位尚未退出时，原扫描退出，不排后继。
-        self.assertEqual(self.advance(native)['action'], 'yield_to_members')
         last = self.advance(native, scope)
         self.assertEqual((last['action'], native.starts[-1]), ('finalize_round', 'scan'))
+        # 汇总后继在工位退出前开跑：再排一个自身后继，不在两边都退出后无人汇总。
+        native.data['runs'][0]['status'] = 'completed'
+        successor = next(item for item in native.data['runs'] if item['id'] == last['receipts'][0]['runId'])
+        successor['status'] = 'running'
+        again = self.advance(native, {**SCOPE, 'current_run': successor['id']})
+        self.assertEqual((again['action'], native.starts.count('scan')), ('finalize_round', 2))
+        for item in native.data['runs']:
+            if item['issue_id'] != 'scan' or item['id'] == successor['id']:
+                item['status'] = 'completed'
+        final = next(item for item in native.data['runs'] if item['id'] == again['receipts'][0]['runId'])
+        final['status'] = 'running'
+        done = self.advance(native, {**SCOPE, 'current_run': final['id']})
+        self.assertEqual(done['action'], 'finalize_round_here')
+        self.assertEqual([(self.lane(native, n)['status'], self.lane(native, n)['metadata']['dailyLane']['state'])
+                          for n in (1, 2)], [('done', 'done'), ('done', 'done')])
 
     def test_duplicate_claims_fail_closed(self):
         data = lane_snapshot(['a', 'b'])
