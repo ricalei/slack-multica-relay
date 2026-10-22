@@ -94,6 +94,123 @@ def receipt(bug):
             'delivery': {'permalink': 'https://slack.example/' + bug['id'], 'readbackVerified': True}}
 
 
+def comment(marker, body, author='agent', at='2026-10-22T01:00:00Z'):
+    return {'author_type': 'agent' if author == 'agent' else 'member', 'author_id': author, 'created_at': at,
+            'content': f'<!-- {marker} round=scan -->\n说明\n\n```json\n{json.dumps(body, ensure_ascii=False)}\n```'}
+
+
+def lane_freeze(scan, keys, complete=False):
+    """工位轮次：清单写在原扫描评论，两张工位卡挂在原扫描下，结论写在工位评论。"""
+    ids = ['intercom:' + key for key in keys]
+    scan['metadata']['dailyRound'] = {
+        'schemaVersion': 1, 'policy': 'investigate_all_then_repair', 'state': 'investigating',
+        'registrationComplete': True, 'candidateCount': len(ids), 'investigationStore': 'lane_comments',
+        'laneIssueIds': ['lane-1', 'lane-2'], 'candidateSetSha256': queue.candidate_set_hash(ids),
+        'candidateManifest': record('manifest'), 'investigationComplete': complete}
+    if complete:
+        scan['metadata']['dailyRound'].update(state='ready_repair', investigationIndex=record('index'))
+    scan['_comments'] = [comment(queue.MANIFEST_MARKER, {'roundId': scan['id'], 'candidates': [
+        {'candidateId': cid, 'feedbackDate': '2026-10-21', 'summary': '摘要' + cid[-1]} for cid in ids]})]
+    return [{**issue(f'lane-{n}', dailyLane={'schemaVersion': 1, 'mode': 'investigate_lane', 'roundId': scan['id'],
+                                              'lane': n, 'laneCount': 2, 'state': 'ready', 'currentCandidateId': None}),
+             'parent_issue_id': scan['id'], 'identifier': f'GRM-L{n}', 'title': f'反馈调查｜10-21 反馈｜工位 {n}/2',
+             '_comments': []} for n in (1, 2)]
+
+
+def conclude(lane, key, state='excluded', at='2026-10-22T02:00:00Z', author='agent'):
+    item = candidate(key, state)['metadata']['dailyInvestigation']
+    lane['_comments'].append(comment(queue.RECORD_MARKER, {**item, 'laneIssueId': lane['id']}, author, at))
+    return item
+
+
+class LaneRoundTests(unittest.TestCase):
+    def setUp(self):
+        self.scan = issue('scan', dailyScan={'targetDate': '2026-10-21', 'coverageComplete': True})
+        self.scan['assignee_id'] = 'agent'
+
+    def test_records_come_from_lane_comments_with_latest_agent_record_winning(self):
+        lanes = lane_freeze(self.scan, ['a', 'b', 'c'])
+        conclude(lanes[0], 'a', 'excluded')
+        conclude(lanes[1], 'b', 'confirmed', at='2026-10-22T02:00:00Z')
+        # 人写的同格式评论不算结论；同一候选取最新的 Agent 记录。
+        conclude(lanes[1], 'c', 'excluded', author='human')
+        conclude(lanes[0], 'b', 'investigating', at='2026-10-22T03:00:00Z')
+        rows, pending = queue.round_candidates(self.scan, [self.scan, *lanes], 'agent')
+        self.assertEqual([row['id'] for row in rows], ['scan:intercom:a', 'scan:intercom:b', 'scan:intercom:c'])
+        self.assertEqual([row['id'] for row in pending], ['scan:intercom:b', 'scan:intercom:c'])
+        self.assertEqual(rows[0]['laneIssueId'], 'lane-1')
+
+    def test_manifest_lane_roster_and_foreign_records_fail_closed(self):
+        lanes = lane_freeze(self.scan, ['a'])
+        for change in ('hash', 'lane', 'foreign', 'manifest'):
+            scan, rows = copy.deepcopy(self.scan), copy.deepcopy(lanes)
+            if change == 'hash':
+                scan['metadata']['dailyRound']['candidateSetSha256'] = '0' * 64
+            elif change == 'lane':
+                rows.pop()
+            elif change == 'foreign':
+                conclude(rows[0], 'unlisted')
+            else:
+                scan['_comments'] = []
+            with self.subTest(change=change), self.assertRaises(queue.QueueError):
+                queue.round_candidates(scan, [scan, *rows], 'agent')
+
+    def test_lane_round_finalizes_and_repairs_with_record_identities(self):
+        lanes = lane_freeze(self.scan, ['a', 'b'])
+        conclude(lanes[0], 'a', 'confirmed')
+        conclude(lanes[1], 'b', 'excluded')
+        plan = queue.next_action([self.scan, *lanes], [], project_id='project', agent_id='agent', round_id='scan')
+        self.assertEqual(plan['action'], 'finalize_round')
+        lane_freeze(self.scan, ['a', 'b'], complete=True)
+        plan = queue.next_action([self.scan, *lanes], [], project_id='project', agent_id='agent', round_id='scan')
+        self.assertEqual((plan['action'], plan['investigationIds']), ('prepare_round_repair', ['scan:intercom:a']))
+        confirmed = [row for row in queue.round_candidates(self.scan, [self.scan, *lanes], 'agent')[0]
+                     if row['id'] == 'scan:intercom:a']
+        bugs = add_repair(self.scan, confirmed)
+        plan = queue.next_action([self.scan, *lanes, *bugs], [], project_id='project', agent_id='agent',
+                                 current_issue_id=bugs[0]['id'], round_id='scan')
+        self.assertEqual(plan['action'], 'resume_repair')
+
+    def test_pending_lane_round_is_left_to_the_dispatcher(self):
+        lanes = lane_freeze(self.scan, ['a'])
+        plan = queue.next_action([self.scan, *lanes], [], project_id='project', agent_id='agent', round_id='scan')
+        self.assertEqual(plan['action'], 'investigate_lanes')
+
+
+class ScopedPlanTests(unittest.TestCase):
+    """跨轮：其它轮次的调查与修复不挡本轮；修复队列全局一次只登记一条。"""
+    def setUp(self):
+        self.old = issue('old', dailyScan={'coverageComplete': True})
+        row = candidate('old-bug', 'waiting_repair')
+        row['metadata']['dailyInvestigation'].update(roundId='old', sourceScanId='old')
+        row['parent_issue_id'] = 'old'
+        freeze(self.old, [row], complete=True)
+        self.old_rows = [row, *add_repair(self.old, [row])]
+        self.scan = issue('scan', dailyScan={'coverageComplete': True})
+        self.lanes = lane_freeze(self.scan, ['a'], complete=True)
+        conclude(self.lanes[0], 'a', 'confirmed')
+
+    def plan(self, runs=(), current=None):
+        return queue.next_action([self.old, *self.old_rows, self.scan, *self.lanes], list(runs), project_id='project',
+                                 agent_id='agent', current_issue_id=current, round_id='scan')
+
+    def test_new_round_repair_waits_for_the_other_batch_then_proceeds(self):
+        self.assertEqual(self.plan()['action'], 'wait_repair_slot')
+        self.old['metadata']['dailyBatch']['state'] = 'completed'
+        self.assertEqual(self.plan()['action'], 'prepare_round_repair')
+
+    def test_unrelated_runs_do_not_make_the_own_batch_yield(self):
+        self.old['metadata']['dailyBatch']['state'] = 'completed'
+        bugs = add_repair(self.scan, [row for row in queue.round_candidates(self.scan, [self.scan, *self.lanes],
+                                                                            'agent')[0]])
+        self.lanes += bugs
+        runs = [{'issue_id': 'lane-2', 'agent_id': 'agent', 'status': 'running'},
+                {'issue_id': 'bug-old-bug', 'agent_id': 'agent', 'status': 'running'}]
+        self.assertEqual(self.plan(runs, current=bugs[0]['id'])['action'], 'resume_repair')
+        runs.append({'issue_id': bugs[0]['id'], 'agent_id': 'agent', 'status': 'running'})
+        self.assertEqual(self.plan(runs, current='scan')['action'], 'wait')
+
+
 class RoundTests(unittest.TestCase):
     def setUp(self):
         self.scan = issue('scan', dailyScan={'targetDate': '2026-10-21', 'coverageComplete': True})
@@ -412,7 +529,7 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(query.call_args.args[1], ['issue', 'runs', 'first', '--active'])
 
     def test_incomplete_pagination_and_wrong_concurrency_cannot_be_reported_as_idle(self):
-        for responses in ([{'id': 'project'}, {'id': 'agent', 'max_concurrent_tasks': 2}],
+        for responses in ([{'id': 'project'}, {'id': 'agent', 'max_concurrent_tasks': 3}],
                           [{'id': 'project'}, {'id': 'agent', 'max_concurrent_tasks': 1},
                            {'issues': [], 'has_more': True, 'total': 1, 'offset': 0}]):
             with self.subTest(responses=responses), patch.object(queue, 'query', side_effect=responses):

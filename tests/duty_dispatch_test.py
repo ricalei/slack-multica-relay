@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from duty_queue_test import candidate, freeze, issue, record, suspended
+from duty_queue_test import candidate, conclude, freeze, issue, lane_freeze, record, suspended
 
 
 spec = importlib.util.spec_from_file_location('duty_dispatch', Path(__file__).parents[1] / 'scripts/duty-dispatch.py')
@@ -25,7 +25,7 @@ def run(issue_id, run_id=None, status='running'):
 
 def snapshot(rows):
     scan = issue('scan', dailyScan={'coverageComplete': True}, dailyExecution={
-        'schemaVersion': 1, 'policy': dispatch.POLICY, 'investigationConcurrency': 2,
+        'schemaVersion': 1, 'policy': dispatch.ISSUE_POLICY, 'investigationConcurrency': 2,
         'repairConcurrency': 1, 'schedulerRevision': REVISION, 'runtimeId': 'runtime'})
     scan.update(assignee_id='agent', status='in_progress')
     freeze(scan, rows)
@@ -67,7 +67,8 @@ class FakeNative:
     def rerun(self, key):
         self.starts.append(key)
         if self.failure != 'before':
-            self.data['runs'].append(run(key, 'new-' + key, 'queued'))
+            count = self.starts.count(key)
+            self.data['runs'].append(run(key, 'new-' + key + ('' if count == 1 else f'-{count}'), 'queued'))
         if self.failure:
             raise dispatch.Error('模拟超时，不能从退出码推断启动失败')
 
@@ -92,7 +93,7 @@ class PlanTests(unittest.TestCase):
             with self.subTest(rows=len(rows)):
                 data = snapshot(rows)
                 result = dispatch.plan(data, **SCOPE)
-                self.assertEqual((result['action'], result['concurrency']), ('finalize_round_here', 1))
+                self.assertEqual(result['action'], 'finalize_round_here')
                 self.assertFalse(data['issues'][0]['metadata']['dailyRound']['investigationComplete'])
 
     def test_missing_evidence_is_still_pending_and_never_becomes_delivery(self):
@@ -116,7 +117,7 @@ class PlanTests(unittest.TestCase):
                 dispatch.plan(data, **SCOPE)
             self.assertEqual(data, before)
 
-    def test_wrong_scope_transfer_run_or_foreign_work_blocks_global_concurrency(self):
+    def test_wrong_scope_transfer_or_duplicate_run_fails_closed(self):
         data = snapshot([candidate()])
         variants = []
         for key in ('agent_id', 'runtime_id', 'workspace_id', 'issue_id'):
@@ -128,9 +129,6 @@ class PlanTests(unittest.TestCase):
         variants.append(changed)
         changed = copy.deepcopy(data)
         changed['issues'][0]['assignee_id'] = 'other'
-        variants.append(changed)
-        changed = copy.deepcopy(data)
-        changed['runs'].append(run('unrelated'))
         variants.append(changed)
         changed = copy.deepcopy(data)
         changed['runs'].append(run('scan', 'duplicate-run'))
@@ -152,7 +150,7 @@ class PlanTests(unittest.TestCase):
         data = snapshot([candidate()])
         data['issues'][0]['metadata']['dailyRound']['registrationComplete'] = False
         self.assertEqual(dispatch.plan(data, **SCOPE)['action'], 'register_round')
-        data['agent']['max_concurrent_tasks'] = 2
+        data['agent']['max_concurrent_tasks'] = 3
         with self.assertRaises(dispatch.Error):
             dispatch.plan(data, **SCOPE)
         data = snapshot([candidate()])
@@ -197,7 +195,7 @@ class DispatchTests(unittest.TestCase):
                          ['dailyInvestigation', 'dailyInvestigation'])
         self.assertFalse(native.issue('scan')['metadata']['dailyRound']['investigationComplete'])
 
-    def test_last_two_workers_lower_concurrency_and_enqueue_one_finalizer(self):
+    def test_last_two_workers_enqueue_one_finalizer_without_changing_concurrency(self):
         data = snapshot([candidate('first', 'excluded'), candidate('second', 'confirmed')])
         data['runs'] = [run('first'), run('second')]
         data['agent']['max_concurrent_tasks'] = 2
@@ -208,7 +206,7 @@ class DispatchTests(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(lambda scope: self.advance(native, scope), scopes))
         self.assertEqual(native.starts, ['scan'])
-        self.assertEqual(native.data['agent']['max_concurrent_tasks'], 1)
+        self.assertEqual((native.data['agent']['max_concurrent_tasks'], native.limits), (2, []))
         self.assertTrue(all(r['action'] == 'finalize_round' for r in results))
         self.assertEqual(results[0]['receipts'][0]['runId'], results[1]['receipts'][0]['runId'])
         self.assertFalse(native.issue('scan')['metadata']['dailyRound']['investigationComplete'])
@@ -246,19 +244,17 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(dispatch.queue.next_action(data['issues'], data['runs'], **serial)['action'],
                          'prepare_round_repair')
 
-    def test_original_scan_with_draining_worker_queues_one_successor_and_exits(self):
+    def test_original_scan_with_draining_worker_exits_and_worker_queues_the_finalizer(self):
         data = snapshot([candidate('last', 'excluded')])
         data['issues'][1]['assignee_id'] = 'agent'
         data['runs'].append(run('last'))
         native = FakeNative(data)
-        result = self.advance(native)
-        self.assertEqual((result['action'], native.starts), ('finalize_round', ['scan']))
-        self.assertEqual(result['receipts'][0]['runId'], 'new-scan')
+        self.assertEqual((self.advance(native)['action'], native.starts), ('yield_to_members', []))
         self.assertNotIn('dailyDispatch', native.issue('scan')['metadata'])
-        self.assertEqual(self.advance(native)['action'], 'yield_to_finalizer')
         worker = {**SCOPE, 'current_issue': 'last', 'current_run': 'last-run'}
-        self.advance(native, worker)
-        self.assertEqual(native.starts, ['scan'])
+        result = self.advance(native, worker)
+        self.assertEqual((result['action'], native.starts), ('finalize_round', ['scan']))
+        self.assertEqual(self.advance(native)['action'], 'yield_to_finalizer')
 
     def test_expired_or_incomplete_conclusions_are_reinvestigated(self):
         for row in (candidate('bug', 'confirmed'), suspended()):
@@ -298,7 +294,7 @@ class DispatchTests(unittest.TestCase):
         del native.data['issues'][0]['metadata']['dailyExecution']
         with self.assertRaises(dispatch.Error):
             self.advance(native)
-        self.assertEqual((native.starts, native.limits, native.writes), ([], [], []))
+        self.assertEqual((native.starts, native.writes), ([], []))
 
     def test_metadata_mismatch_stops_launch_and_keeps_other_slot_eligible(self):
         native = FakeNative(snapshot([candidate('first')]))
@@ -310,6 +306,121 @@ class DispatchTests(unittest.TestCase):
         with patch.object(native, 'metadata', side_effect=save):
             result = self.advance(native)
         self.assertEqual((result['action'], native.starts), ('attention', []))
+
+
+def lane_snapshot(keys, other_round=False):
+    scan = issue('scan', dailyScan={'coverageComplete': True}, dailyExecution={
+        'schemaVersion': 1, 'policy': dispatch.LANE_POLICY, 'laneCount': 2,
+        'repairConcurrency': 1, 'schedulerRevision': REVISION, 'runtimeId': 'runtime'})
+    scan.update(assignee_id='agent', status='in_progress')
+    lanes = lane_freeze(scan, keys)
+    issues = [scan, *lanes]
+    if other_round:
+        # 前一轮仍在修复：不再挡住本轮调查。
+        old = issue('old', dailyRound={'state': 'repairing'}, dailyBatch={'state': 'running', 'bugIds': ['x']})
+        issues.append(old)
+    for row in issues:
+        row['workspace_id'] = 'workspace'
+        row['assignee_id'] = 'agent'
+    return {'agent': {'id': 'agent', 'workspace_id': 'workspace', 'runtime_id': 'runtime',
+                      'max_concurrent_tasks': 2}, 'issues': issues, 'runs': [run('scan')]}
+
+
+class LaneDispatchTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def advance(self, native, scope=SCOPE):
+        with dispatch.locked(self.root / 'dispatch.lock'):
+            return dispatch.advance(native, dispatch.Journal(self.root / 'journal.json'), scope)
+
+    def lane(self, native, number):
+        return next(row for row in native.data['issues'] if row['id'] == f'lane-{number}')
+
+    def finish(self, native, number, key, state='excluded'):
+        """模拟工位运行：执行中的工位写好结论评论后，由同一运行交接。"""
+        conclude(self.lane(native, number), key, state)
+        current = next(item for item in native.data['runs'] if item['issue_id'] == f'lane-{number}'
+                       and item['status'] in {'queued', 'running'})
+        current['status'] = 'running'
+        return {**SCOPE, 'current_issue': f'lane-{number}', 'current_run': current['id']}
+
+    def test_scan_claims_one_candidate_per_lane_even_when_another_round_is_repairing(self):
+        native = FakeNative(lane_snapshot(['a', 'b', 'c'], other_round=True))
+        result = self.advance(native)
+        self.assertEqual(result['action'], 'dispatch')
+        self.assertEqual(native.starts, ['lane-1', 'lane-2'])
+        self.assertEqual([self.lane(native, n)['metadata']['dailyLane']['currentCandidateId'] for n in (1, 2)],
+                         ['intercom:a', 'intercom:b'])
+        self.assertEqual(native.limits, [])
+
+    def test_lane_reads_its_claim_and_cannot_hand_off_before_a_conclusion(self):
+        native = FakeNative(lane_snapshot(['a', 'b', 'c']))
+        self.advance(native)
+        lane_run = next(item for item in native.data['runs'] if item['issue_id'] == 'lane-1')
+        lane_run['status'] = 'running'
+        scope = {**SCOPE, 'current_issue': 'lane-1', 'current_run': lane_run['id']}
+        result = dispatch.plan(native.snapshot(), **scope)
+        self.assertEqual((result['action'], result['candidateId']), ('investigate_candidate', 'intercom:a'))
+        with self.assertRaises(dispatch.Error):
+            self.advance(native, scope)
+
+    def test_concluded_lane_claims_next_and_queues_only_its_own_successor(self):
+        native = FakeNative(lane_snapshot(['a', 'b', 'c']))
+        self.advance(native)
+        native.data['runs'][-1]['status'] = 'running'
+        result = self.advance(native, self.finish(native, 1, 'a'))
+        self.assertEqual(result['action'], 'dispatch')
+        self.assertEqual(native.starts, ['lane-1', 'lane-2', 'lane-1'])
+        self.assertEqual(self.lane(native, 1)['metadata']['dailyLane']['currentCandidateId'], 'intercom:c')
+        self.assertEqual(self.lane(native, 2)['metadata']['dailyLane']['currentCandidateId'], 'intercom:b')
+        self.assertEqual(result['receipts'][0]['status'], 'queued')
+
+    def test_last_conclusions_hand_back_to_one_finalizer(self):
+        native = FakeNative(lane_snapshot(['a', 'b']))
+        self.advance(native)
+        native.data['runs'][-1]['status'] = 'running'
+        first = self.advance(native, self.finish(native, 1, 'a'))
+        self.assertEqual((first['action'], first['released']), ('dispatch', ['lane-1']))
+        self.assertEqual(self.lane(native, 1)['metadata']['dailyLane']['state'], 'done')
+        # 仍有未完成候选时原扫描只核对派发，不重复领取。
+        idle = self.advance(native)
+        self.assertEqual((idle['action'], idle['claims'], idle['issueIds']), ('dispatch', [], []))
+        scope = self.finish(native, 2, 'b', 'confirmed')
+        # 结论已留档但工位尚未退出时，原扫描退出，不排后继。
+        self.assertEqual(self.advance(native)['action'], 'yield_to_members')
+        last = self.advance(native, scope)
+        self.assertEqual((last['action'], native.starts[-1]), ('finalize_round', 'scan'))
+
+    def test_duplicate_claims_fail_closed(self):
+        data = lane_snapshot(['a', 'b'])
+        for number in (1, 2):
+            data['issues'][number]['metadata']['dailyLane']['currentCandidateId'] = 'intercom:a'
+        with self.assertRaises(dispatch.Error):
+            dispatch.plan(data, **SCOPE)
+
+
+class ReleaseRepairTests(unittest.TestCase):
+    def test_waiting_round_is_started_only_after_the_other_batch_finishes(self):
+        data = lane_snapshot(['a'])
+        scan, lanes = data['issues'][0], data['issues'][1:3]
+        lane_freeze(scan, ['a'], complete=True)
+        conclude(lanes[0], 'a', 'confirmed')
+        old = issue('old', dailyRound={'state': 'repairing'},
+                    dailyBatch={'mode': 'scan', 'state': 'running', 'bugIds': ['x'], 'total': 1, 'index': 1,
+                                'currentIssueId': 'x'})
+        data['issues'].append(old)
+        native = FakeNative(data)
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        journal = dispatch.Journal(Path(temp.name) / 'release.json')
+        kwargs = dict(agent_id='agent', runtime_id='runtime', project_id='project')
+        self.assertEqual(dispatch.release_repair(native, journal, **kwargs)['action'], 'wait')
+        old['metadata']['dailyBatch']['state'] = 'completed'
+        result = dispatch.release_repair(native, journal, **kwargs)
+        self.assertEqual((result['action'], native.starts), ('released', ['scan']))
 
 
 class NativeTests(unittest.TestCase):
@@ -329,10 +440,6 @@ class NativeTests(unittest.TestCase):
                           {'issues': [], 'offset': 0, 'total': 1, 'has_more': False}]):
             with self.assertRaises(dispatch.Error):
                 native.snapshot()
-        with patch.object(native, 'call', side_effect=[{'max_concurrent_tasks': 2}, {},
-                                                      {'max_concurrent_tasks': 2}]):
-            with self.assertRaises(dispatch.Error):
-                native.concurrency(1)
 
 
 if __name__ == '__main__':
