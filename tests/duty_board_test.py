@@ -12,6 +12,8 @@ board_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(board_module)
 
 REVIEWER = 'U1'
+# 未传 --duty-agent 时脚本默认的值守 Agent。
+DUTY_AGENT = '387e0620-8a22-44f5-919c-4a3e6296fcfb'
 NOW = dt.datetime(2026, 10, 15, 0, 30, tzinfo=dt.timezone.utc)
 
 
@@ -240,7 +242,7 @@ class BugStateTests(unittest.TestCase):
 class SlackReadResilienceTests(unittest.TestCase):
     def collect(self, first_state, prs, read_thread, string_delivery=False):
         scan = {'id': 'scan', 'identifier': 'S1', 'title': 'scan', 'created_at': '2026-10-14T01:00:00Z',
-                'metadata': {'dailyScan': {'targetDate': '2026-10-13'}}}
+                'assignee_id': DUTY_AGENT, 'metadata': {'dailyScan': {'targetDate': '2026-10-13'}}}
         issues = [scan]
         entries = [{'issue': 'S1', 'kind': 'scan', 'feedbackDate': '2026-10-13',
                     'collected': {'facebook': 2}, 'suspected': 2, 'coverageComplete': True}]
@@ -430,9 +432,9 @@ class CohortTests(unittest.TestCase):
     def test_real_batch_attribution_excludes_older_batch_and_retains_rejected_confirmations(self):
         scans = [
             {'id': 'batch12', 'identifier': 'GRM-621', 'title': 'scan', 'created_at': '2026-10-13T01:00:00Z',
-             'metadata': {'dailyScan': {'targetDate': '2026-10-12'}}},
+             'assignee_id': DUTY_AGENT, 'metadata': {'dailyScan': {'targetDate': '2026-10-12'}}},
             {'id': 'batch13', 'identifier': 'GRM-635', 'title': 'scan', 'created_at': '2026-10-14T01:00:00Z',
-             'metadata': {'dailyScan': {'targetDate': '2026-10-13'}}},
+             'assignee_id': DUTY_AGENT, 'metadata': {'dailyScan': {'targetDate': '2026-10-13'}}},
             {'id': 'old', 'identifier': 'GRM-602', 'title': 'old', 'created_at': '2026-10-11T03:00:00Z', 'metadata': {}},
         ]
         issues, entries = list(scans), []
@@ -489,18 +491,46 @@ class CohortTests(unittest.TestCase):
         self.assertIsNone(board_module.bug_cohort(issue, {}, {}))
 
     def test_investigation_repair_keeps_original_scan_cohort_without_adding_collection(self):
-        scan = {'id': 'scan', 'identifier': 'S1', 'created_at': '2026-10-21T00:00:00Z',
+        scan = {'id': 'scan', 'identifier': 'S1', 'created_at': '2026-10-21T00:00:00Z', 'assignee_id': DUTY_AGENT,
                 'metadata': {'dailyScan': {'targetDate': '2026-10-20'}}}
         batch = {'id': 'repair', 'identifier': 'R1', 'created_at': '2026-10-23T00:00:00Z',
                  'parent_issue_id': 'scan',
                  'metadata': {'dailyBatch': {'mode': 'repair', 'sourceScanId': 'scan'}}}
         bug = {'parent_issue_id': 'repair', 'metadata': {'dailyBug': {'mode': 'bug', 'batchId': 'repair'}}}
         cohort = board_module.bug_cohort(bug, {'scan': scan, 'repair': batch}, {})
-        self.assertEqual(cohort, {'scanDate': '2026-10-21', 'feedbackDate': '2026-10-20', 'batch': 'R1'})
+        self.assertEqual(cohort, {'scanDate': '2026-10-21', 'feedbackDate': '2026-10-20', 'batch': 'R1',
+                                  'agentId': DUTY_AGENT})
         self.assertNotIn('dailyScan', batch['metadata'])
         self.assertIsNone(board_module.bug_cohort(bug, {'repair': batch}, {}))
         batch['parent_issue_id'] = 'different-scan'
         self.assertIsNone(board_module.bug_cohort(bug, {'scan': scan, 'repair': batch}, {}))
+
+    def test_same_target_date_only_counts_duty_agent_scan_and_its_bugs(self):
+        # 副本 Agent 在同一项目里更晚复跑同一反馈日，不能顶替值守 Agent 的扫描，也不能把它的 Bug 计入。
+        def scan(key, agent, created, canny):
+            return {'id': key, 'identifier': key, 'title': 'scan', 'created_at': created, 'assignee_id': agent,
+                    'metadata': {'dailyScan': {'targetDate': '2026-10-22', 'coverageComplete': True,
+                                               'collected': {'canny': canny, 'facebook': 3, 'intercom': 363}}}}
+        issues = [scan('GRM-1405', 'duty', '2026-10-22T19:00:18Z', 17),
+                  scan('GRM-1434', 'copy', '2026-10-23T09:49:57Z', 19)]
+        entries = [{'issue': 'GRM-1405', 'kind': 'scan', 'feedbackDate': '2026-10-22'}]
+        for key, parent in (('B1', 'GRM-1405'), ('B2', 'GRM-1434')):
+            issues.append({'id': key, 'identifier': key, 'title': key, 'created_at': '2026-10-23T10:00:00Z',
+                           'parent_issue_id': parent, 'metadata': {'dailyBug': {'mode': 'bug', 'batchId': parent}}})
+            entries.append({'issue': key, 'kind': 'bug', 'source': 'intercom', 'prs': []})
+        comments = [{'created_at': '2026-10-23', 'content': board_module.BOARD_MARKER
+                     + '\n```json\n' + json.dumps(entries) + '\n```'}]
+        args = SimpleNamespace(start='2026-10-12', today='2026-10-23', project='p', ledger_issue='L',
+                               issue_url_base='https://m/', reviewer=REVIEWER, slack_cli='slack', duty_agent='duty')
+        with patch.object(board_module, 'load_issues', return_value=issues), \
+             patch.object(board_module, 'run_json', return_value=comments):
+            scans, bugs, warnings = board_module.collect(args, NOW)
+        self.assertEqual(warnings, [])
+        self.assertEqual([item['identifier'] for item in scans], ['GRM-1405'])
+        self.assertEqual([item['identifier'] for item in bugs], ['B1'])
+        board = board_module.build_board(scans, bugs, dt.date(2026, 10, 12), dt.date(2026, 10, 23))
+        row = board['rows'][-1]
+        self.assertEqual((row['date'], row['collected'], row['confirmed']), ('2026-10-22', 383, 1))
 
 
 

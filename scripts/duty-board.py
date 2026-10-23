@@ -580,7 +580,8 @@ def bug_cohort(issue, issues_by_id, ledger):
     record = ledger.get((source['identifier'], 'scan')) or {}
     feedback = scan.get('targetDate') or record.get('feedbackDate')
     # 历史非扫描批次可识别为范围外，不猜它属于哪一个反馈日。
-    return {'scanDate': scan_date(source), 'feedbackDate': feedback, 'batch': batch['identifier']}
+    return {'scanDate': scan_date(source), 'feedbackDate': feedback, 'batch': batch['identifier'],
+            'agentId': source.get('assignee_id')}
 
 
 def slack_thread(cli, permalink):
@@ -645,10 +646,10 @@ def collect(args, now):
     except (subprocess.CalledProcessError, json.JSONDecodeError, OSError, progress_module.queue.QueueError):
         warnings.append('调查工位评论读取失败，相关轮次的调查进度待核对')
     runs = []
+    duty_agent = getattr(args, 'duty_agent', '387e0620-8a22-44f5-919c-4a3e6296fcfb')
     if any(_meta(issue, 'dailyRound') for issue in issues):
         try:
-            runs = run_json(['multica', 'agent', 'tasks', getattr(args, 'duty_agent',
-                            '387e0620-8a22-44f5-919c-4a3e6296fcfb'), '--output', 'json'])
+            runs = run_json(['multica', 'agent', 'tasks', duty_agent, '--output', 'json'])
             if not isinstance(runs, list):
                 raise ValueError('运行列表无效')
         except (subprocess.CalledProcessError, ValueError, OSError):
@@ -657,12 +658,14 @@ def collect(args, now):
     through = (dt.date.fromisoformat(args.today) if args.today else now.astimezone(TZ).date()) - dt.timedelta(days=1)
     for issue in issues:
         is_bug = (_meta(issue, 'dailyBug') or {}).get('mode') == 'bug'
-        is_scan = bool(_meta(issue, 'dailyScan')) and scan_date(issue) >= start.isoformat()
+        # 同一项目里可能有其它 Agent（如副本本机复跑）的同反馈日扫描；只统计值守 Agent 名下的扫描批次及其 Bug。
+        is_scan = (bool(_meta(issue, 'dailyScan')) and issue.get('assignee_id') == duty_agent
+                   and scan_date(issue) >= start.isoformat())
         if not (is_bug or is_scan):
             continue
         cohort = bug_cohort(issue, issues_by_id, ledger) if is_bug else None
         if is_bug:
-            if cohort and cohort['scanDate'] < start.isoformat():
+            if cohort and (cohort['scanDate'] < start.isoformat() or cohort['agentId'] != duty_agent):
                 continue
             if not cohort or not cohort['feedbackDate']:
                 warnings.append(f"{issue['identifier']} 缺少所属扫描批次或批次反馈日，未计入看板")
@@ -1263,7 +1266,7 @@ def main(argv=None):
     parser.add_argument('--project', required=True, help='每日 Bug 值守项目 ID')
     parser.add_argument('--server-url', default='https://multica.devops.moego.dev')
     parser.add_argument('--workspace-id', default='1b6d114a-8407-4ba8-adea-d31209caabe5')
-    parser.add_argument('--duty-agent', default='387e0620-8a22-44f5-919c-4a3e6296fcfb', help='值守 Agent 的真实运行来源')
+    parser.add_argument('--duty-agent', default='387e0620-8a22-44f5-919c-4a3e6296fcfb', help='值守 Agent：只统计其名下的扫描批次，并读取其真实运行')
     parser.add_argument('--ledger-issue', required=True, help='看板字段台账任务 ID 或编号')
     parser.add_argument('--start', required=True, help='d1 对应的反馈日（YYYY-MM-DD）')
     parser.add_argument('--today', help='Asia/Shanghai 当天日期，默认取当前时间')
