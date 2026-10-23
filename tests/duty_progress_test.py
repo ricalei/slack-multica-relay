@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from duty_queue_test import (candidate, freeze, issue, add_repair, deliver, suspended, block, receipt,
-                             lane_freeze, conclude)
+                             lane_freeze, conclude, comment)
 
 
 spec = importlib.util.spec_from_file_location('board_stages', Path(__file__).parents[1] / 'scripts/duty-board.py')
@@ -48,6 +48,21 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual(result['current'][0]['phase'], '调查')
         self.assertEqual(result['current'][0]['summary'], '工位 2/2：摘要b')
         self.assertEqual(result['investigation']['confirmedIssueIds'], ['scan:intercom:a'])
+
+    def test_failure_skip_is_visible_but_never_counted_as_confirmed_or_excluded(self):
+        scan, _ = fixture([])
+        scan['metadata']['dailyExecution'] = {'investigationFailurePolicy': progress.queue.FAILURE_POLICY}
+        lanes = lane_freeze(scan, ['a'])
+        item = conclude(lanes[0], 'a', 'investigating')
+        item.update(state='skipped_failure', nextAction='恢复来源后续查', failureSkip={
+            'retryLimit': 2, 'runIds': ['r1', 'r2', 'r3'], 'reason': '读取失败',
+            'resumeCondition': '来源可读', 'skippedAt': '2026-10-23T09:00:00Z'})
+        lanes[0]['_comments'][-1] = comment(progress.queue.RECORD_MARKER, item)
+        result = snapshot(scan, [scan, *lanes])
+        inv = result['investigation']
+        self.assertEqual((inv['completed'], inv['skippedFailure'], inv['confirmed'], inv['excluded']), (1, 1, 0, 0))
+        self.assertIn('执行失败跳过 1（未确认）', str(board.progress_rows(result)))
+        self.assertEqual(result['repair']['state'], 'not_needed')
 
     def test_partial_investigation_has_collection_and_real_current_work_without_final_ledger(self):
         scan, issues = fixture([candidate('first', 'confirmed'), candidate('second')])

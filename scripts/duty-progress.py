@@ -56,7 +56,7 @@ def investigation(scan, issues):
               'confirmedIssueIds': [row['id'] for row in concluded
                                     if queue.meta(row, 'dailyInvestigation')['state'] in queue.FIXABLE],
               'duplicate': states.count('duplicate'), 'excluded': states.count('excluded'),
-              'csFollowed': states.count('cs_followed')}
+              'csFollowed': states.count('cs_followed'), 'skippedFailure': states.count('skipped_failure')}
     return result, members
 
 

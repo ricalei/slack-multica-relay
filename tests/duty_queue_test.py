@@ -123,6 +123,31 @@ def conclude(lane, key, state='excluded', at='2026-10-22T02:00:00Z', author='age
     return item
 
 
+class FailureSkipTests(unittest.TestCase):
+    def test_verified_failure_skip_settles_round_without_becoming_fixable(self):
+        scan = issue('scan', dailyScan={'coverageComplete': True})
+        scan['assignee_id'] = 'agent'
+        scan['metadata']['dailyExecution'] = {'investigationFailurePolicy': queue.FAILURE_POLICY}
+        lanes = lane_freeze(scan, ['a', 'b'], complete=True)
+        item = conclude(lanes[0], 'a', 'investigating')
+        item.update(state='skipped_failure', nextAction='恢复依赖后续查', failureSkip={
+            'retryLimit': 2, 'runIds': ['run-1', 'run-2', 'run-3'], 'reason': '来源访问失败',
+            'resumeCondition': '来源恢复访问', 'skippedAt': '2026-10-23T09:00:00Z'})
+        lanes[0]['_comments'][-1] = comment(queue.RECORD_MARKER, item)
+        conclude(lanes[1], 'b', 'confirmed')
+        rows, pending = queue.round_candidates(scan, [scan, *lanes], 'agent')
+        self.assertEqual(len(pending), 0)
+        result = queue.round_plan(scan, [scan, *lanes], {row['id']: row for row in [scan, *lanes]}, 'agent')
+        self.assertEqual(result['investigationIds'], ['scan:intercom:b'])
+        for key in ('reason', 'resumeCondition', 'runIds', 'nextAction'):
+            broken = copy.deepcopy(item)
+            (broken if key == 'nextAction' else broken['failureSkip']).pop(key)
+            self.assertFalse(queue.concluded(broken))
+        item['failureSkip']['runIds'] = ['run-1'] * 3
+        self.assertFalse(queue.concluded(item))
+
+
+
 class LaneRoundTests(unittest.TestCase):
     def setUp(self):
         self.scan = issue('scan', dailyScan={'targetDate': '2026-10-21', 'coverageComplete': True})

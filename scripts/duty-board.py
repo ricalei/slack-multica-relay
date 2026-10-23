@@ -374,6 +374,8 @@ def progress_rows(progress):
     if inv['state'] in {'investigating', 'completed'}:
         inv_text = (f"已留档 {inv['completed']}/{inv['total']} 个问题 · 确认可修 {inv['confirmed']}"
                     f" · 重复 {inv['duplicate']} · 已有工单 {inv['csFollowed']} · 排除 {inv['excluded']}")
+        if inv.get('skippedFailure'):
+            inv_text += f" · 执行失败跳过 {inv['skippedFailure']}（未确认）"
     else:
         inv_text = {'registering': '本轮清单登记中', 'legacy': '历史记录未保存逐条调查进度',
                     'attention': '证据或清单待核对，完成数未知'}[inv['state']]
@@ -728,7 +730,7 @@ SCAN_INDEX_NAME = 'scan-evidence-index.json'
 SCAN_INDEX_MAX_BYTES = 20 * 1024 * 1024
 # 顺序即页面展示顺序：需要处理的在前，非 Bug 在后。
 RECORD_STATES = {
-    'confirmed': '确认可修', 'verification_blocked': '待验证/验证受阻', 'duplicate': '重复',
+    'confirmed': '确认可修', 'skipped_failure': '执行失败已跳过（未确认）', 'verification_blocked': '待验证/验证受阻', 'duplicate': '重复',
     'cs_followed': '已有工单跟进', 'excluded_after_investigation': '调查后排除',
     'product_decision': '产品/设计诉求', 'non_bug': '普通支持',
 }

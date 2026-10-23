@@ -15,12 +15,14 @@
 
 ## 执行版本与轮次隔离
 
-发布只更新 instructions 与下轮 Autopilot 正文，不改变当前轮的 metadata、任务归属、运行或 Agent 并发。仍只保留值守与看板两个 Agent，不新增子 Agent。
+正常发布只更新 instructions 与下轮 Autopilot 正文，不改变当前轮现场；下述明确授权的单轮恢复例外仅升级该轮调度版本与异常接续协议，不改采集、清单、结论、归属或 Agent 并发。仍只保留值守与看板两个 Agent，不新增子 Agent。
 
 - **既有轮次**：没有 `dailyExecution` 的扫描及其调查、修复，继续使用固定提交 `701a7303acb6da9b4ce40e1838aafa0922b8a22a` 的 `duty-queue.py`、protocolVersion=2 和原串行规则；不得补写新协议或提高并发。
 - **逐条调查轮次**：`dailyExecution.policy=parallel_investigation_serial_repair_v1` 的轮次沿用逐条调查任务与自己的固定版本。若它停在调查派发，且调度器报“存在其它未结束轮次”，可只把 `dailyExecution.schedulerRevision` 升级为本次发布的 SHA 并回读后继续；不改清单、调查任务、结论或修复现场。升级后按本次版本规则执行：不切换 Agent 并发，计划器带 `--round-id`。
-- **工位轮次**：仅当新扫描正文明确 `executionPolicy=lane_investigation_serial_repair_v2` 和完整 schedulerRevision，且真实身份与当前 Runtime 核对通过，才初始化 `dailyExecution={schemaVersion:1,policy:"lane_investigation_serial_repair_v2",laneCount:2,repairConcurrency:1,schedulerRevision:"<正文固定 SHA>",runtimeId:"<本 Agent 真实 Runtime UUID>"}` 并回读。全新扫描先保存并回读 dailyExecution，再初始化 dailyRound，避免登记中断后丢失协议；已有 dailyRound 却没有 dailyExecution 的轮次不得迁移。其它轮次仍在调查或修复时，本轮照常采集和调查，不接管其它轮次。
-- 各轮次始终读取自己 `dailyExecution.schedulerRevision` 的脚本，不跟随后续全局 Prompt 发布切换版本（上面逐条调查轮次的一次性升级除外）。工位卡正文必须写入 roundId、schedulerRevision 和本协议入口。工位轮次的细则见下方「调查并发协议」；它优先于通用串行接续中的调查交接步骤。修复复用同版本 `duty-queue.py` 的完整交付门槛。
+- **工位轮次**：仅当新扫描正文明确 `executionPolicy=lane_investigation_serial_repair_v2` 和完整 schedulerRevision，且真实身份与当前 Runtime 核对通过，才初始化 `dailyExecution={schemaVersion:1,policy:"lane_investigation_serial_repair_v2",laneCount:2,repairConcurrency:1,investigationFailurePolicy:"retry_2_then_skip_v1",schedulerRevision:"<正文固定 SHA>",runtimeId:"<本 Agent 真实 Runtime UUID>"}` 并回读。全新扫描先保存并回读 dailyExecution，再初始化 dailyRound，避免登记中断后丢失协议；已有 dailyRound 却没有 dailyExecution 的轮次不得迁移。其它轮次仍在调查或修复时，本轮照常采集和调查，不接管其它轮次。
+- 各轮次始终读取自己 `dailyExecution.schedulerRevision` 的脚本，不跟随后续全局 Prompt 发布切换版本（本节明确授权的单轮升级除外）。工位卡正文必须写入 roundId、schedulerRevision 和本协议入口。工位轮次的细则见下方「调查并发协议」；它优先于通用串行接续中的调查交接步骤。修复复用同版本 `duty-queue.py` 的完整交付门槛。
+- **GRM-1291 一次性迁移**：GRM-1291（`01a15fd5-eed9-7acb-8859-e069259551dc`）经真人授权，从 `701a7303…` 迁到 `8bd7b16121d3e16992d26e68eb6fa184b732f1c8`，dailyExecution 记为逐条调查轮次并保存 migratedFrom。GRM-1372、GRM-1373 为真人跳过，状态 cancelled，不计完整交付；固定队列从第 3/6 项 GRM-1374 继续，之后按本版本规则执行：不要求并发 1，计划器带 `--round-id`，受阻后通知并接续。该轮修复卡正文里“701a730 版 duty-queue.py、Agent 并发必须为 1”的旧要求以本条为准。批次以 `outcome=finished_with_skips` 结束并保存 complete_round 后，把 GRM-1372、GRM-1373 移到项目「GRM 每日 Bug 值守｜历史归档」（`315de3ef-534e-45fd-947f-1947794f6968`）并回读，保留其 worktree、分支、PR 与证据。此例外只适用于 GRM-1291。
+- **GRM-1405 异常接续恢复**：本轮经真人授权，在现有运行退出后将 dailyExecution.schedulerRevision 升为本次发布 SHA，并启用 investigationFailurePolicy=retry_2_then_skip_v1；保留两张工位卡、完整启动 journal、既有结论与三源成功回执。只通过下述 recover 接续无活动运行的工位，不重新采集 Facebook 或 Intercom，不迁移其它轮次。
 - **Agent 并发**：调度脚本不再修改 `max_concurrent_tasks`。仍有固定在 `701a7303…`、`06de9554…` 或 `aa44a557…` 且未结束、未升级的轮次时，并发保持 1；这些轮次结束后由真人固定为 2。并发为 2 时，修复队列同一时间只执行批次当前项，由计划器保证；另一个名额供调查工位和真人评论触发的返工、解除受阻、回告使用。
 
 ## 能力入口
@@ -41,14 +43,14 @@ Multica 任务操作一律用原生 CLI：先看帮助，核对服务、GRM 工�
 2. Canny 不用 vote/Quick Win 门槛过滤 Bug；按 newest 读取到日期边界后，只取窗口内创建的帖子及其页面可见评论。覆盖口径为 period-created-posts / page-visible；不承诺发现旧帖当天的新评论、编辑或票数变化，不称全历史或全量评论。评论不全时可按需补背景，信息不足的候选不能进入修复。Facebook 只代表现有 Slack 汇总频道，不直接抓 Facebook。Intercom 每个会话一条 evidence：`inWindow=true` 的客户消息是当日反馈，其余消息只作上下文；自行判断是否 Bug 与业务归属，不只关注功能需求；被隐藏的邮箱、电话、链接不得还原。本轮 scan 保存候选后，按 Intercom manifest 的 `runArtifact` 与 `evidenceArtifacts` 删除会话文件；之后需要原文时，用会话链接经 intercom skill 的 `get-conversation` 重读。Intercom evidence 的 `csTickets` 是该会话已关联的 CS 工单；`moegoCompanyIds` 是联系人所属公司的 MoeGo company ID，只是候选：联系人可能属于多个公司，也可能是代客户提问的 MoeGo 内部员工；达到 10 个时列表可能不全。取证前先用会话中的对象 ID、链接，或逐个 company 查数据，确认实际出问题的商家。
 3. 覆盖各业务，团队/domain 字段仅帮助确定背景与目标仓库，不能作为排除理由；实际背景不明时补证。归并同一问题，保存来源稳定身份、链接、现象、预期及依据、影响、平台和验收目标。对当前项目、现有周度值守和 Bug Resolver 的任务/PR 查重，已有在途工作只关联，不重复开工；不自动恢复取消、停止或已关闭项。已有合并修复仍须核对客户受影响版本与修复范围，不能仅凭有 PR 就排除回归。已关联工单的反馈视为已有工单跟进：Intercom 以 `csTickets` 非空，或 `jiraKeys` 中经 jira skill 回读确认存在的研发项目工单（如 MER、IFRFE）为准；Canny、Facebook 在补证时经 jira skill 按来源链接或标题只读搜索 CS；命中的记录标为已有工单跟进并保存工单号，不再调查验证，也不计入待验证。
 4. 用本项目任务和 metadata 保存候选与来源覆盖，不新增规则后台。三源任一失败时可以保存已读事实和候选，但不新建完整修复批次或宣称无 Bug；记录受影响来源、已尝试路径及补采条件。
-5. 本轮固定清单的全部调查都有证据与结论、完整调查索引已回读后，才为 confirmed 项形成唯一固定修复批次与顺序；有 1 项即可组成批次，但不能在其余调查未完成时提前启动。`total` 是本批次入选数量，不随之后采集增长。使用批次任务 metadata `dailyBatch` 保存 `{mode,state,bugIds,index,total,currentIssueId,deliveryVersion,advancePolicy,deliveredBugIds,completedDeliveries}`，修复队列的 index 从 1 开始，advancePolicy 为 after_verified_delivery；受阻接续轮次另用 `blockedBugIds` 与 `blockNotices` 记录已通知的受阻项（见第 3 节「受阻通知与接续」）；真实父子任务关系必须与 batchId 一致。每个 Bug 独立建任务，metadata `dailyBug` 保存 `{mode,batchId,index,total,candidateId,state,deliveryVersion,reviewState}`，正文保存必要上下文与验收目标，并明确完整交付后自动接续、不等待逐项人工确认。每个依赖测试部署的 Bug 正文必须明确写入：「本任务验收必须收集目标修复分支的构建/部署 CI 结果，确认目标提交实际部署并就绪，然后完成动态 Case 和完整报告交付；仅本地测试通过、PR 已创建或 CI 仍在运行不满足验收标准。」保存后回读该条件；不能仅在 Agent Prompt 中泛写需验收，而遗漏任务自身对 CI 结果的明确要求。
+5. 本轮固定清单均已形成有依据的结论或有界重试后留档跳过、完整调查索引已回读后，才为 confirmed 项形成唯一固定修复批次与顺序；有 1 项即可组成批次，但不能在其余调查未完成时提前启动。`total` 是本批次入选数量，不随之后采集增长。使用批次任务 metadata `dailyBatch` 保存 `{mode,state,bugIds,index,total,currentIssueId,deliveryVersion,advancePolicy,deliveredBugIds,completedDeliveries}`，修复队列的 index 从 1 开始，advancePolicy 为 after_verified_delivery；受阻接续轮次另用 `blockedBugIds` 与 `blockNotices` 记录已通知的受阻项（见第 3 节「受阻通知与接续」）；真实父子任务关系必须与 batchId 一致。每个 Bug 独立建任务，metadata `dailyBug` 保存 `{mode,batchId,index,total,candidateId,state,deliveryVersion,reviewState}`，正文保存必要上下文与验收目标，并明确完整交付后自动接续、不等待逐项人工确认。每个依赖测试部署的 Bug 正文必须明确写入：「本任务验收必须收集目标修复分支的构建/部署 CI 结果，确认目标提交实际部署并就绪，然后完成动态 Case 和完整报告交付；仅本地测试通过、PR 已创建或 CI 仍在运行不满足验收标准。」保存后回读该条件；不能仅在 Agent Prompt 中泛写需验收，而遗漏任务自身对 CI 结果的明确要求。
 6. 未结束修复批次按原固定队列恢复，不另起第二批次、不回退 index。新流程必须先完成本轮全部调查再登记修复，后续 Bug 初始均无 assignee，只指派首项自身启动并回读；每项完整交付后，或在受阻接续轮次中受阻结果回读后，按固定顺序自动接续，不等待逐项人工确认。不能提前将全部任务指派启动，也不能占着唯一运行名额等待下一个任务。工程 completed/finished_with_skips 且仅人工待审不算在途修复；状态矛盾先核对。
 7. 本轮全部调查留档后，scan 将实际开始时间、上海目标日、各来源窗口/状态/证据、查重与候选分类、在途检查、调度回执和结论保存于当前任务及附件。逐条证据索引固定命名为 `scan-evidence-index.json`，单独作为当前任务附件上传或放入证据 zip；每日看板据此展示昨日逐条记录。零项合格或缺源也保存真实结果；调查未完成只保存当前阶段和恢复动作，不发送完成通知；缺源记录失败及补采条件，不写成成功零反馈。每轮扫描结束后向指定交付频道发送一次扫描结果并回读。按以下模板替换全部占位，控制在 8 行内；补证方式、归并与计数口径、历史接续等过程描述只放任务附件，不写进消息：
 
    ```text
    每日 Bug 值守｜MM-DD 反馈扫描完成　<当前任务链接>
 
-   结论：<今日无新增可修 Bug / 新增可修 N 个> · 本轮调查 N/N · <三源采集正常 / 哪个来源有问题>
+   结论：<今日无新增可修 Bug / 新增可修 N 个> · 本轮处理 N/N<有跳过时补：执行失败跳过 N，未确认> · <三源采集正常 / 哪个来源有问题>
 
    本轮结果（已采集 N 条）
    • 调查结论：新增可修 N · 重复 N
@@ -59,7 +61,7 @@ Multica 任务操作一律用原生 CLI：先看帮助，核对服务、GRM 工�
    需要关注：<仅在来源采集失败或覆盖不全、字段台账写入失败、报告或附件上传失败、需要人工决定时出现，一行写事项与影响>
    ```
 
-   某组没有条目时省略该组。真正外部缺证的过程、数量、材料缺口和恢复条件保留在 Multica 任务、完整报告与分类台账；值守 Agent 的 Slack 扫描和交付汇总不单列这些内容，也不为它们另发通知。Slack 中展示的分类数量不作为全部反馈的完整去向分解。未调查与技术失败不能混入外部缺证数量，也不能据此报告完成。重跑复用既有回执，避免重复通知。定时触发与运行开始分别记录；配置回读不代表自动周期已实测，运行元数据无法证明的项目注明未验证。
+   某组没有条目时省略该组。真正外部缺证的过程、数量、材料缺口和恢复条件保留在 Multica 任务、完整报告与分类台账；值守 Agent 的 Slack 扫描和交付汇总不单列这些内容，也不为它们另发通知。Slack 中展示的分类数量不作为全部反馈的完整去向分解。未调查与技术失败不能混入外部缺证数量；执行失败跳过按协议单独标明，不能声称全部验证通过。重跑复用既有回执，避免重复通知。定时触发与运行开始分别记录；配置回读不代表自动周期已实测，运行元数据无法证明的项目注明未验证。
 
 ### 疑似 Bug 必须调查验证
 
@@ -114,7 +116,8 @@ Multica 任务操作一律用原生 CLI：先看帮助，核对服务、GRM 工�
 - `confirmed`：保存 `verification={fixable:true,productDecisionRequired:false,expectedBehaviorRef,observedDeviationRef,dedupeRef}`，三个引用指向实际依据、已验证偏差和最新查重结果。只登记确认结论，暂不创建或启动修复。
 - `excluded / duplicate / cs_followed`：保存 conclusionRef，指向真实排除依据、重复任务/PR 或已回读工单。调查完成后可将任务置 done；已有工单按原规则停止扩展调查，解释未执行路径的原因。
 - `suspended_external`：只有原来源、实现、数据、验证路径都有实际尝试记录，且剩余材料只能由外部提供时成立；保存下方 blocker。它是“已调查、等待外部证据”，不得混同未调查项。
-- `ready / investigating`、运行中断、权限或工具失败：调查尚未完成。保存错误、已做动作和恢复位置，继续现有能力内可做的动作；不能写成排除或外部挂起来放行修复。原任务按正常中断恢复规则续作，不新增定时器或自建无限 rerun。
+- `ready / investigating`：仍需调查。启用 investigationFailurePolicy=retry_2_then_skip_v1 的工位遇到可恢复故障时，先沿授权路径恢复或尝试替代取证；仍未形成有效结论，就保存 executionFailure={kind,error}、已做动作、现有报告与 nextAction，回读后立即调用 advance。调度器按候选保留首次运行及最多 2 次重试；仍失败则自动追加 skipped_failure 记录并接下一条。非此协议轮次仍保留原失败恢复规则。
+- `skipped_failure`：本轮执行失败已跳过，不是已验证、排除或外部缺证。调度器保存三次运行 ID、具体错误、恢复条件、跳过时间及已有调查报告；运行日志是崩溃或报告生成失败时的过程依据。不要求先补齐缺失报告才能释放工位。此项不进入修复、不计确认或排除，不自动回流本轮和下一轮，不等待人工重新调用才能处理其它项。未知启动结果、归属/版本冲突、人工取消不走失败跳过，必须先核对真实现场。
 
 ```json
 {
@@ -135,7 +138,7 @@ Multica 任务操作一律用原生 CLI：先看帮助，核对服务、GRM 工�
 
 台账或通知失败按原规则保存待补内容和具体错误，不伪造回读；调查完成由固定清单与实际调查证据判断。完整调查索引上传或回读未完成时不能进入修复。
 
-本轮所有条目都达到上述有证据的结论，才汇总 `scan-evidence-index.json` 与完整调查索引，上传后下载核对，保存 `dailyRound.investigationIndex={attachmentId,sha256,readbackHashVerified:true}`、investigationComplete=true、state=ready_repair。原扫描、分类台账和扫描结果同步更新；未调查项必须为 0，不能仅上传 pending-candidates 附件后结束。真正外部缺证的数量如实保留。调查未完成时只能报告当前阶段和未完成范围，不能发送“反馈扫描完成”。三源失败仍如实记录，不能把缺源解释为无 Bug。
+本轮所有条目都达到上述有证据的结论，或已按有限重试协议留档为执行失败跳过，才汇总 `scan-evidence-index.json` 与完整调查索引，上传后下载核对，保存 `dailyRound.investigationIndex={attachmentId,sha256,readbackHashVerified:true}`、investigationComplete=true、state=ready_repair。原扫描、分类台账和扫描结果同步更新；未处理项必须为 0，不能仅上传 pending-candidates 附件后结束。执行失败跳过数及恢复条件在完整索引与阶段进度中明确保留；不能把含跳过项的轮次说成全部验证通过。真正外部缺证的数量如实保留。调查未完成时只能报告当前阶段和未完成范围，不能发送“反馈扫描完成”。三源失败仍如实记录，不能把缺源解释为无 Bug。
 
 #### 固定本轮修复队列
 
@@ -149,7 +152,7 @@ Multica 任务操作一律用原生 CLI：先看帮助，核对服务、GRM 工�
 
 工位轮次固定流程为：采集与完整登记（原扫描）→ 两张工位卡并行调查 → 原扫描统一汇总 → 固定修复队列（全局一次一项）。两张工位卡各用独立的 worktree、报告目录、浏览器 tab 和测试数据；涉及共享测试资源时先核对归属，不覆盖另一工位的环境或证据。只有以下调度器能领取候选、启动工位或原扫描；工位运行不手工 assign/rerun，不增建 Agent，任何运行都不修改 Agent 并发。
 
-从本轮 `dailyExecution.schedulerRevision` 精确 fetch/show `scripts/duty-dispatch.py` 与 `scripts/duty-queue.py`，导出到同一临时目录。完整登记、三源覆盖回读后，原扫描调用一次 `advance`；工位每次开工先调用 `plan`，结论记录回读后调用 `advance`。实际参数来自原生 CLI 回读的当前 Issue/run 与原扫描，不凭标题猜测：
+从本轮 `dailyExecution.schedulerRevision` 精确 fetch/show `scripts/duty-dispatch.py` 与 `scripts/duty-queue.py`，导出到同一临时目录。完整登记、三源覆盖回读后，原扫描调用一次 `advance`；工位每次开工先调用 `plan`，结论或具体失败记录回读后调用 `advance`；禁止保存失败后直接结束而不交接。实际参数来自原生 CLI 回读的当前 Issue/run 与原扫描，不凭标题猜测：
 
 ```bash
 python3 <同一临时目录>/duty-dispatch.py advance \
@@ -161,19 +164,21 @@ python3 <同一临时目录>/duty-dispatch.py advance \
   --round-id <原扫描 UUID> --current-issue <当前 Issue UUID> --current-run <当前真实 run UUID>
 ```
 
-`plan` 与 `advance` 返回 protocolVersion=2。**开工 plan 只读核对，不派发、没有 receipts。工位收到 `investigate_candidate` 时只调查其中的 candidateId；收到其它结果说明本工位没有在查的候选，直接 advance。**只有交接 advance 才执行真实写入并返回 receipts：
+`plan` 与 `advance` 返回 protocolVersion=2。**开工 plan 只读核对，不派发、没有 receipts。工位收到 `investigate_candidate` 时只调查其中的 candidateId；收到 `settle_failure` 时仅调用 advance 留档并接续，不再执行调查；收到其它结果说明本工位没有在查的候选，直接 advance。**只有交接 advance 才执行真实写入并返回 receipts：
 
 - `register_round`：留在原扫描完成登记。
-- `dispatch`：调度器已为空闲工位和当前工位各领取一条未领候选（写入 `dailyLane.currentCandidateId`），并给当前工位排一个后继运行；清单已领完的工位标为 done。核对 receipts 后结束当前运行，不占着名额等待其它工位。当前工位所领候选尚无有效结论时，advance 报错并保留现场；先保存结论或失败现场，不领取下一条。
+- `dispatch`：调度器已为空闲工位和当前工位各领取一条未领候选（写入 `dailyLane.currentCandidateId`），并给当前工位排一个后继运行；清单已领完的工位标为 done。核对 receipts 后结束当前运行，不占着名额等待其它工位。当前候选没有有效结论但有具体失败记录时，调度器给同一候选排最多 2 次重试；耗尽后追加 skipped_failure 并释放工位领下一条。空闲工位上已结束却没有结论的运行也走相同有界恢复；不把 run completed 当成调查完成。
 - `finalize_round`：全部候选已有结论，调度器为原扫描排入或复用唯一汇总后继；当前运行结束释放名额，不自行汇总或建修复队列。原扫描自己收到它时，说明仍有工位运行尚未退出，调度器已为原扫描再排一个后继，当前运行直接退出；后继开跑时再核对一次，直到工位全部退出。
 - `yield_to_finalizer`：原扫描已有汇总后继排队，当前运行直接退出，避免两次汇总。
 - `finalize_round_here`：原扫描是唯一活动运行且全部工位已退出：调度器已把两张工位卡标为 done 并把任务状态置为 done；当前运行核对全部候选证据与结论，统一生成、上传并回读完整索引、分类台账与扫描汇总，再按只读计划器进入固定修复流程。
 
-工位运行只写自己的结论记录与报告；不写父扫描的 dailyRound、dailyBatch、dailyDispatch、最终分类索引、台账或 Slack 汇总，所有共享调度由同 Runtime 的短锁串行执行。工位后继以清单剩余条数为上限，不是无限 rerun。原扫描**仅在调查交接阶段**准备退出前重新调用 advance；已经接管汇总、建立固定修复队列或排入首个 Bug 后，按串行修复接续退出，不再调用调查调度器。
+工位运行只写自己的结论记录与报告；不写父扫描的 dailyRound、dailyBatch、dailyDispatch、最终分类索引、台账或 Slack 汇总，所有共享调度由同 Runtime 的短锁串行执行。工位后继以每个候选首次加最多 2 次重试为上限；同一候选不清零重试计数，不是无限 rerun。原扫描**仅在调查交接阶段**准备退出前重新调用 advance；已经接管汇总、建立固定修复队列或排入首个 Bug 后，按串行修复接续退出，不再调用调查调度器。
+
+异常退出后如果另一个工位仍在运行，它的 advance 会回读并恢复空闲工位。两张工位都已退出时，在真人明确恢复该轮的授权下，导出该轮固定版本脚本，以同一作用域调用 `duty-dispatch.py recover --round-id <原扫描 UUID> --current-issue <无活动运行的工位 UUID>`，其余 server/workspace/project/agent/runtime/revision 参数同上，不传 current-run。recover 不采集、不重建清单，不接受仍有活动运行的目标工位，不清理 journal；只对已证实的结束运行安排剩余重试；三次调查均已结束时，仅排一次 settle_failure 交接运行，由 Agent 留档后接下一条，不再调查，也不以真人身份伪装结论作者。启动结果不明则保留 intent。恢复后由工位自身留档与交接，不新增周期巡检。
 
 逐条调查轮次使用同一调度器：`dispatch` 补足最多两条未结束调查并启动，其余返回值含义同上；调查任务只写自身过程、报告与结论。
 
-调度器在 `~/.config/moego/daily-bug-duty/dispatch/` 保存共享锁与每轮启动 journal，不能复制到工作树或清除未收尾 intent。启动结果不明先按调用前后真实 run ID 差集核对；未知未证实、真实失败或报告缺口返回 attention/非零退出，保留现场与具体恢复动作，不重发启动、不归为外部缺证，也不宣称全轮完成。禁止手工绕过锁，禁止调查运行提前进入修复。
+调度器在 `~/.config/moego/daily-bug-duty/dispatch/` 保存共享锁与每轮启动 journal，不能复制到工作树或清除未收尾 intent。启动结果不明先按调用前后真实 run ID 差集核对；未知启动结果、归属或协议矛盾返回 attention/非零退出，只回读、不重发启动。启用异常接续的工位中，已证实结束但没有有效结论的运行（含报告缺口）按有限重试后留档跳过，不归为外部缺证或验证通过。禁止手工绕过锁，禁止调查运行提前进入修复。
 
 **修复名额交接**：任一轮次的固定修复队列结束（complete_round 已保存）后，当前运行在结束前用最早一条未完成、调度版本支持该命令的轮次的固定版本执行一次 `duty-dispatch.py release-repair`（参数同上，不传 round/current/revision）。返回 released 表示已唤起该轮原扫描登记修复，wait 表示仍有队列在途，idle 表示没有等待的轮次；只记录回执，不重复执行。
 

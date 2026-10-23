@@ -86,9 +86,9 @@ Cloudflare 使用 `pnpm dev:cf`、`pnpm build:cf` 和 `pnpm deploy:cf`，共享�
 
 值守规则在 [DAILY-BUG-DUTY-PROMPT.md](DAILY-BUG-DUTY-PROMPT.md)，扫描 Autopilot 的任务正文在 [DAILY-BUG-SCAN-PROMPT.md](DAILY-BUG-SCAN-PROMPT.md)。采集按每来源最后成功日期补到昨天，已成功窗口复用。调查只补读指定原帖、会话或 thread，不调用日采集，Facebook、Intercom 不重复采集。
 
-每轮扫描用 `dailyRound` 冻结疑似 Bug 的数量和 candidateId 集合摘要，清单与完整调查过程放真实附件；metadata 只保留状态和回执。工位轮次不再为每条候选建任务：清单写成原扫描上的 `daily-round-manifest:v3` 评论，原扫描下只建两张调查工位卡，每条结论以 `daily-investigation:v3` 评论追加在工位卡上，同一候选取最新的 Agent 记录。修复项以 `<扫描 UUID>:<candidateId>` 对应调查记录。逐条调查轮次仍是每条候选一张调查子任务。确认一项后继续调查下一项，不能提前开始修复。每条确认、排除、重复、已有工单或外部缺证结论都须有可回读的报告；未调查、技术失败和泛化缺口不算完成。
+每轮扫描用 `dailyRound` 冻结疑似 Bug 的数量和 candidateId 集合摘要，清单与完整调查过程放真实附件；metadata 只保留状态和回执。工位轮次不再为每条候选建任务：清单写成原扫描上的 `daily-round-manifest:v3` 评论，原扫描下只建两张调查工位卡，每条结论以 `daily-investigation:v3` 评论追加在工位卡上，同一候选取最新的 Agent 记录。修复项以 `<扫描 UUID>:<candidateId>` 对应调查记录。逐条调查轮次仍是每条候选一张调查子任务。确认一项后继续调查下一项，不能提前开始修复。每条确认、排除、重复、已有工单或外部缺证结论都须有可回读的报告；未调查、未留档技术失败和泛化缺口不算完成。启用 `dailyExecution.investigationFailurePolicy=retry_2_then_skip_v1` 的工位按候选最多首次加 2 次重试，失败记录回读后必须 advance；耗尽由调度器追加 `skipped_failure`（具体错误、三次运行 ID、恢复条件、已有证据），释放工位接下一条，不计确认、排除或验证通过。已结束但未交接的工位可由另一工位的 advance 恢复；全部退出时，真人授权后用同作用域的 `duty-dispatch.py recover --current-issue <空闲工位 UUID>` 恢复。未知启动 intent 不消耗重试、不重复启动；不清理 journal、不重采成功来源。
 
-全部候选有依据的结论与完整调查索引回读后，才能设置 investigationComplete；三源覆盖完整后才建立原扫描的固定 dailyBatch。Bug 子任务用 investigationIssueId 对应调查项，全部确认项登记并回读后固定 total、bugIds 和当前位置。同一个值守 Agent 沿用现有修复、CI、动态验收、最终 HTML、PR 与交付回读门槛逐项执行，完整交付后推进固定队列。需要真人或外部条件才能继续的受阻项先在交付频道发受阻结果并回读，记入 `blockedBugIds` 与 `blockNotices` 后接续下一项，真人解除后在原任务补完；固定队列走完即结束本轮，最后一项的消息兼作批次汇总。固定在 `701a730` 或 `06de955` 的旧轮次仍在受阻时停住，等待授权或跳过。
+全部候选形成有依据的结论或有界重试后留档跳过、且完整调查索引回读后，才能设置 investigationComplete；三源覆盖完整后才建立原扫描的固定 dailyBatch。Bug 子任务用 investigationIssueId 对应调查项，全部确认项登记并回读后固定 total、bugIds 和当前位置。同一个值守 Agent 沿用现有修复、CI、动态验收、最终 HTML、PR 与交付回读门槛逐项执行，完整交付后推进固定队列。需要真人或外部条件才能继续的受阻项先在交付频道发受阻结果并回读，记入 `blockedBugIds` 与 `blockNotices` 后接续下一项，真人解除后在原任务补完；固定队列走完即结束本轮，最后一项的消息兼作批次汇总。固定在 `701a730` 或 `06de955` 的旧轮次仍在受阻时停住，等待授权或跳过。
 
 真正外部缺证必须保留原来源、实现、数据与验证路径的实际尝试、缺失材料和恢复条件，作为已调查结论保存在任务、完整报告与分类台账；值守 Agent 的 Slack 汇总不单列这些内容或数量，也不另发通知。不能把尚未调查项留在候选附件后报告扫描完成。旧扫描、旧 pending-candidates 和历史待调查已停止，仅用于追溯、查重，不自动导入新轮次。停止不删除证据，不改写已有修复与交付结果。
 
