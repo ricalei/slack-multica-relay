@@ -160,11 +160,8 @@ def bug_state(prs, rejected, blocked=False):
     # 上线按关联 PR 全部 merged 判断；历史驳回标记不覆盖实际合并结果。
     if prs and all(pr['state'] == 'merged' for pr in prs):
         return 'released'
-    if rejected:
+    if rejected or blocked:
         return 'rejected'
-    # 修复受阻时队列已越过该项，单独列出提示真人解除，不混在修复中或待审里。
-    if blocked:
-        return 'blocked'
     if not prs:
         return 'fixing'
     if any(pr['state'] == 'closed' for pr in prs):
@@ -357,7 +354,9 @@ def funnel_cells(board, row):
 def bug_status_text(bug):
     state = STATE_LABELS[bug['state']]
     if bug['state'] == 'rejected':
-        state += f"：{bug['rejection'].get('reason') or '原因未填'}"
+        state += f"：{(bug.get('rejection') or {}).get('reason') or '原因未填'}"
+    if bug.get('reviewUnknown'):
+        state += '（Slack 审查标记未核对）'
     return state
 
 
@@ -393,7 +392,7 @@ def progress_rows(progress):
         else:
             fix_text += ' · ' + {'blocked': '修复受阻，详见当前任务', 'paused': '已暂停', 'cancelled': '已取消'}[fix['state']]
         if fix.get('blocked'):
-            fix_text += f" · 受阻 {fix['blocked']} 项待解除"
+            fix_text += f" · 受阻 {fix['blocked']} 项已归不上线"
     else:
         fix_text = {'not_started': '尚未开始，等待全轮调查与汇总', 'preparing': '固定修复清单登记中',
                     'not_needed': '本轮无新增可修项', 'attention': '交付证据或暂停现场待核对'}[fix['state']]
@@ -443,7 +442,7 @@ def render_markdown(board, now):
     lines += ['', '### 数据说明', ''] + [f'- {warning}' for warning in board['warnings']] + [
         '- 确认可修：按所属扫描批次统计，方案后续被驳回仍计入；范围外批次不回溯计入。',
         '- 已上线：关联 PR 全部为 merged；部分合并、待审或关闭未合并不算已上线。',
-        '- 不上线：尚未全部合并且审查人在 Bug 交付 thread 上点 🚫；原因取其以 🚫 开头的最新回复。',
+        '- 不上线：关联 PR 尚未全部合并，且修复受阻或审查人在 Bug 交付 thread 上点 🚫；保留受阻原因或审查回复，不自动补验收。',
         f'- 已回告：台账有发送记录；用户回应：Intercom 须 CS 回复确实告知客户已修复上线后，客户再有消息才算。'
         f'Canny 由看板 Agent 按语义判断回告后的新评论是否为客户回应，票数变化只作参考。从回告起跟踪 {FOLLOW_UP_DAYS} 天；Facebook 不跟踪回应。']
     return '\n'.join(lines) + '\n'
@@ -582,8 +581,11 @@ def slack_thread(cli, permalink):
     with tempfile.TemporaryDirectory() as directory:
         output = Path(directory) / 'thread.json'
         subprocess.run([sys.executable, cli, 'replies', '--url', permalink, '--output', str(output)],
-                       check=True, capture_output=True, text=True)
-        return json.loads(output.read_text())['messages']
+                       check=True, capture_output=True, text=True, timeout=30)
+        messages = json.loads(output.read_text())['messages']
+        if not isinstance(messages, list):
+            raise ValueError('Slack thread 消息列表无效')
+        return messages
 
 
 def intercom_parts(cli, url):
@@ -694,17 +696,31 @@ def collect(args, now):
             warnings.append(f"{issue['identifier']} 在字段台账中没有记录，未计入看板")
             continue
         daily_bug = _meta(issue, 'dailyBug') or {}
+        delivery = board.get('delivery')
+        # 兼容历史台账直接保存 Slack permalink 的写法。
+        if isinstance(delivery, str):
+            delivery = {'permalink': delivery}
         bug = {'identifier': issue['identifier'], 'url': args.issue_url_base + issue['identifier'],
                'summary': issue['title'].split('｜')[-1], 'feedbackDate': cohort['feedbackDate'], 'scanDate': cohort['scanDate'],
                'batch': cohort['batch'], 'sourceFeedbackDate': board.get('feedbackDate'),
                'investigationIssueId': daily_bug.get('investigationIssueId'),
                'source': board.get('source'), 'sourceUrl': board.get('sourceUrl'),
-               'deliveryPermalink': (board.get('delivery') or {}).get('permalink'), 'rejection': None, 'notify': None,
+               'deliveryPermalink': (delivery or {}).get('permalink'), 'rejection': None, 'notify': None,
                'delivered': daily_bug.get('completeDelivery') is True}
         bug['prs'] = [github.pr(url) for url in board.get('prs') or []]
-        if bug['deliveryPermalink']:
-            bug['rejection'] = rejection(slack_thread(args.slack_cli, bug['deliveryPermalink']), args.reviewer)
-        bug['state'] = bug_state(bug['prs'], bug['rejection'] is not None, daily_bug.get('state') == 'blocked')
+        blocked = daily_bug.get('state') == 'blocked'
+        bug['state'] = bug_state(bug['prs'], False, blocked)
+        # 受阻默认不上线，已合并仍按事实记上线；两者都不依赖历史 Slack 消息是否仍存在。
+        if bug['state'] == 'rejected':
+            bug['rejection'] = {'reason': (daily_bug.get('blocker') or {}).get('reason') or '修复受阻，本项不上线',
+                                'source': 'blocked'}
+        elif bug['state'] != 'released' and bug['deliveryPermalink']:
+            try:
+                bug['rejection'] = rejection(slack_thread(args.slack_cli, bug['deliveryPermalink']), args.reviewer)
+            except (subprocess.SubprocessError, OSError, ValueError, KeyError, TypeError):
+                bug['reviewUnknown'] = True
+                warnings.append(f"{bug['identifier']} Slack 交付 thread 读取失败，审查标记未核对；保留 PR 状态继续生成")
+            bug['state'] = bug_state(bug['prs'], bug['rejection'] is not None)
         if bug['state'] == 'released':
             notify = ledger.get((issue['identifier'], 'notify'))
             bug['notify'] = notify_state(notify)
@@ -851,7 +867,9 @@ def _bug_note(bug, now, ages):
     if bug['state'] == 'released':
         return notify_label(bug, now)
     if bug['state'] == 'rejected':
-        return bug['rejection'].get('reason') or '原因未填'
+        return (bug.get('rejection') or {}).get('reason') or '原因未填'
+    if bug.get('reviewUnknown'):
+        return 'Slack 审查标记未核对'
     return ages.get(bug['identifier'], '')
 
 
@@ -1048,7 +1066,7 @@ def _html_view(payload):
             + _html_todo(payload) + '</div>' + _html_progress(payload) + _html_bugs(payload)
             + _html_trend(payload) + _html_records(payload)
             + '<footer>已上线：关联 PR 全部 merged；确认可修按所属扫描批次统计，后续方案驳回仍计入。'
-            '不上线：尚未全部合并且审查人在交付 thread 上点 🚫。</footer></div></main>')
+            '不上线：关联 PR 尚未全部合并，且修复受阻或审查人在交付 thread 上点 🚫；保留证据，不自动补验收。</footer></div></main>')
 
 
 def _html_progress(payload):

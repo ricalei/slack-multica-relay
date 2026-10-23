@@ -29,6 +29,6 @@ investigationFailurePolicy=retry_2_then_skip_v1
 
 1. 新轮调查使用 dailyExecution 固定版本的 duty-dispatch.py（protocolVersion=2），采集、汇总与修复使用同版本 duty-queue.py（protocolVersion=2，必须带 --round-id）。旧轮继续各自固定版本，不迁移或重采。只读计划不等于真实启动。按 Agent 的 collect_sources、register_round、investigate_lanes、finalize_round、prepare_round_repair、wait_repair_slot、resume_repair、advance_after_block、complete_round 等动作执行；任何矛盾先核对，不旁路全轮调查门槛。
 2. 全轮调查完成、三源覆盖完整且无其它真实修复队列在途后，在原扫描登记唯一固定修复批次，仅纳入 confirmed 项；其它轮次的修复队列未结束时返回 wait_repair_slot，保留现场结束运行，等其结束后由 release-repair 唤起。沿用值守 Agent 当前修复能力，每个 Bug 正文保留目标分支 CI、真实部署版本、动态 Case、最终完整 HTML、PR 和交付回读要求；不参考其它 Agent 的专属规则。
-3. 只将首项指派自身，回读真实 queued/dispatched/running 后结束当前运行释放唯一名额。每项完整交付后，或真实受阻并按 Agent 模板在交付频道发出、回读受阻结果后，自动接下一修复；受阻项保留现场，待真人解除后在原任务补完。最后一项的消息写明本批次结果，不另发批次汇总；结束本轮后执行一次 release-repair 唤起等待修复的轮次；不返回历史调查队列，不等待逐项人工确认。PR 合并和生产发布仍需明确授权。
+3. 只将首项指派自身，回读真实 queued/dispatched/running 后结束当前运行释放唯一名额。每项完整交付后，或真实受阻并按 Agent 模板在交付频道发出、回读受阻结果后，自动接下一修复；尚未全部合并的受阻项统一归“不上线”，保留现场与证据，不自动补验收、催办解除或回流队列，仅真人明确要求恢复时续作。已回读的历史 Slack 消息被删除后不补发、不要求重新点 🚫。最后一项的消息写明本批次结果，不另发批次汇总；结束本轮后执行一次 release-repair 唤起等待修复的轮次；不返回历史调查队列，不等待逐项人工确认。PR 合并和生产发布仍需明确授权。
 4. 三源缺失、调查未完成、报告缺口或执行失败必须保留现场和具体恢复动作，不能伪造完成或无 Bug。零项合格也须有完整调查与分类证据。保存来源覆盖、scan-evidence-index.json、完整调查索引、真实交接和交付回执。
 5. 全轮调查完成后，按 Agent 模板向指定频道 <交付频道 ID> 发送一次扫描结果并回读；明确调查完成数、确认可修数及下一步。外部缺证的过程、数量、材料缺口和恢复条件保留在任务、完整报告与分类台账，不在值守 Agent 的 Slack 汇总中单列，也不另发通知。执行失败跳过数量在阶段结论中明确标出，过程与恢复条件留在任务和完整索引；含跳过项不能声称全部验证通过。尚在调查时只报告实际阶段，不发完成通知；重跑复用回执，避免重复发送。

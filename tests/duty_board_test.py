@@ -1,6 +1,7 @@
 import datetime as dt
 import importlib.util
 import json
+import subprocess
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -203,15 +204,97 @@ class BugStateTests(unittest.TestCase):
         self.assertEqual(board_module.bug_state([pr('open'), pr('closed')], False), 'pr_closed')
         self.assertEqual(board_module.bug_state([], False), 'fixing')
 
-    def test_blocked_repair_is_listed_apart_unless_merged_or_rejected(self):
-        self.assertEqual(board_module.bug_state([pr('open')], False, blocked=True), 'blocked')
-        self.assertEqual(board_module.bug_state([], False, blocked=True), 'blocked')
+    def test_blocked_repair_is_not_for_release_unless_all_prs_are_merged(self):
+        self.assertEqual(board_module.bug_state([pr('open')], False, blocked=True), 'rejected')
+        self.assertEqual(board_module.bug_state([], False, blocked=True), 'rejected')
+        self.assertEqual(board_module.bug_state([pr('merged'), pr('open')], False, blocked=True), 'rejected')
         self.assertEqual(board_module.bug_state([pr('merged')], False, blocked=True), 'released')
         self.assertEqual(board_module.bug_state([pr('open')], True, blocked=True), 'rejected')
-        board = board_module.build_board([], [bug('K1', '2026-10-13', 'blocked'), bug('W1', '2026-10-13', 'review')],
-                                         dt.date(2026, 10, 13), dt.date(2026, 10, 14))
-        self.assertIn('🚧 受阻 1：[K1]', '\n'.join(board_module.status_lines(board, NOW)))
-        self.assertEqual([entry[0]['identifier'] for entry in board_module.attention(board, NOW)['blocked']], ['K1'])
+
+
+class SlackReadResilienceTests(unittest.TestCase):
+    def collect(self, first_state, prs, read_thread, string_delivery=False):
+        scan = {'id': 'scan', 'identifier': 'S1', 'title': 'scan', 'created_at': '2026-10-14T01:00:00Z',
+                'metadata': {'dailyScan': {'targetDate': '2026-10-13'}}}
+        issues = [scan]
+        entries = [{'issue': 'S1', 'kind': 'scan', 'feedbackDate': '2026-10-13',
+                    'collected': {'facebook': 2}, 'suspected': 2, 'coverageComplete': True}]
+        for identifier, state, urls in [('B1', first_state, list(prs)), ('B2', 'delivered', ['next'])]:
+            issues.append({'id': identifier, 'identifier': identifier, 'title': identifier,
+                           'created_at': '2026-10-14T02:00:00Z', 'parent_issue_id': 'scan',
+                           'metadata': {'dailyBug': {'mode': 'bug', 'batchId': 'scan', 'state': state,
+                                                    'blocker': {'reason': '测试环境权限不足'}}}})
+            entries.append({'issue': identifier, 'kind': 'bug', 'source': 'facebook',
+                            'prs': urls, 'delivery': identifier if string_delivery else {'permalink': identifier}})
+        comments = [{'created_at': '2026-10-14', 'content': board_module.BOARD_MARKER
+                     + '\n```json\n' + json.dumps(entries) + '\n```'}]
+        args = SimpleNamespace(start='2026-10-13', today='2026-10-15', project='p', ledger_issue='L',
+                               issue_url_base='https://m/', reviewer=REVIEWER, slack_cli='slack')
+        with patch.object(board_module, 'load_issues', return_value=issues), \
+             patch.object(board_module, 'run_json', return_value=comments), \
+             patch.object(board_module.GitHub, 'pr', side_effect=lambda url: prs.get(url) or pr('open')), \
+             patch.object(board_module, 'slack_thread', side_effect=read_thread) as threads:
+            scans, bugs, warnings = board_module.collect(args, NOW)
+        result = board_module.build_board(scans, bugs, dt.date(2026, 10, 13), dt.date(2026, 10, 15))
+        result['warnings'].extend(warnings)
+        return result, threads
+
+    def test_string_delivery_permalink_in_legacy_ledger_is_read_without_dropping_bugs(self):
+        board, threads = self.collect('delivered', {'one': pr('open')}, lambda cli, url: [], string_delivery=True)
+        self.assertEqual([item['state'] for item in board['bugs']], ['review', 'review'])
+        self.assertEqual([item['deliveryPermalink'] for item in board['bugs']], ['B1', 'B2'])
+        self.assertEqual(board['warnings'], [])
+        threads.assert_any_call('slack', 'B1')
+        threads.assert_any_call('slack', 'B2')
+
+    def test_blocked_and_merged_bugs_do_not_depend_on_deleted_slack_threads(self):
+        for prs in ({}, {'one': pr('open')}, {'one': pr('merged'), 'two': pr('open')},
+                    {'one': pr('merged'), 'two': pr('merged')}):
+            with self.subTest(prs=prs):
+                def thread(cli, url):
+                    self.assertEqual(url, 'B2', '受阻和全部合并项不应读取已删除的旧消息')
+                    return []
+                board, threads = self.collect('blocked', prs, thread)
+                first = board['bugs'][0]
+                merged = bool(prs) and all(item['state'] == 'merged' for item in prs.values())
+                self.assertEqual(first['state'], 'released' if merged else 'rejected')
+                self.assertEqual(len(first['prs']), len(prs))
+                self.assertEqual(board['warnings'], [])
+                threads.assert_called_once_with('slack', 'B2')
+                if merged:
+                    continue
+                self.assertEqual((board['total']['confirmed'], board['total']['rejected'],
+                                  board['total']['shouldShip']), (2, 1, 1))
+                self.assertEqual(first['rejection']['reason'], '测试环境权限不足')
+                self.assertFalse(board_module.attention(board, NOW)['blocked'])
+                self.assertEqual([item['identifier'] for item, _ in board_module.attention(board, NOW)['review']], ['B2'])
+                self.assertIn('⛔ 不上线 1：[B1]', board_module.render_slack(board, NOW))
+                self.assertIn('测试环境权限不足', board_module.render_markdown(board, NOW))
+                payload = board_module.html_payload(board, NOW, None, '无索引')
+                self.assertIn('测试环境权限不足', board_module.render_html(payload))
+                self.assertNotIn('B1', [item['identifier'] for item in payload['todo']])
+
+    def test_missing_thread_timeout_or_invalid_response_keeps_other_bugs_and_reports_unknown_review(self):
+        failures = [subprocess.CalledProcessError(1, ['slack'], stderr='thread_not_found'),
+                    subprocess.TimeoutExpired(['slack'], 30), OSError('unavailable'),
+                    json.JSONDecodeError('invalid', '', 0), KeyError('messages'), ValueError('invalid messages')]
+        for error in failures:
+            with self.subTest(error=type(error).__name__):
+                def thread(cli, url):
+                    if url == 'B1':
+                        raise error
+                    return []
+                board, threads = self.collect('delivered', {'one': pr('open')}, thread)
+                self.assertEqual([item['state'] for item in board['bugs']], ['review', 'review'])
+                self.assertTrue(board['bugs'][0]['reviewUnknown'])
+                self.assertIsNone(board['bugs'][0]['rejection'])
+                self.assertEqual((board['total']['confirmed'], board['total']['rejected']), (2, 0))
+                self.assertEqual(threads.call_count, 2)
+                self.assertEqual(len(board['warnings']), 1)
+                for render in (board_module.render_markdown, board_module.render_slack):
+                    self.assertIn('B1 Slack 交付 thread 读取失败', render(board, NOW))
+                payload = board_module.html_payload(board, NOW, None, '无索引')
+                self.assertIn('Slack 审查标记未核对', board_module.render_html(payload))
 
 
 class BoardTests(unittest.TestCase):

@@ -124,7 +124,8 @@ class ProgressTests(unittest.TestCase):
         bugs[0]['metadata']['dailyBug']['blocker'] = {'kind': 'authorization_required', 'phase': 'test_deployment'}
         result = snapshot(scan, issues + bugs)
         self.assertEqual((result['repair']['state'], result['repair']['completed']), ('blocked', 0))
-        self.assertIn('等待当前任务所需授权', result['nextAction'])
+        self.assertIn('受阻项归不上线并保留证据，不自动补验收', result['nextAction'])
+        self.assertIn('该批次仍停在阻塞位置', result['nextAction'])
         self.assertIn('完整交付 0/1', str(board.progress_rows(result)))
         scan['metadata']['dailyBatch']['state'] = 'paused'
         self.assertIn('等待真人决定', snapshot(scan, issues + bugs)['nextAction'])
@@ -140,13 +141,13 @@ class ProgressTests(unittest.TestCase):
         result = snapshot(scan, issues + bugs)
         self.assertEqual((result['repair']['state'], result['repair']['completed'], result['repair']['blocked']),
                          ('repairing', 0, 1))
-        self.assertIn('固定队列第 2/2 项 · 受阻 1 项待解除', str(board.progress_rows(result)))
+        self.assertIn('固定队列第 2/2 项 · 受阻 1 项已归不上线', str(board.progress_rows(result)))
         scan['metadata']['dailyBatch'].update(
             state='completed', outcome='finished_with_blocked', currentIssueId=None,
             deliveredBugIds=['bug-second'], completedDeliveries=[receipt(bugs[1])])
         result = snapshot(scan, issues + bugs)
         self.assertEqual((result['repair']['state'], result['repair']['completed']), ('completed_with_blocked', 1))
-        self.assertIn('受阻项', result['nextAction'])
+        self.assertIn('受阻项归不上线并保留证据，仅真人明确要求恢复时续作', result['nextAction'])
 
     def test_registration_mismatch_or_wrong_scope_cannot_be_successful_zero(self):
         for mutation in ('missing', 'scope', 'paused'):
