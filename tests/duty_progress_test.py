@@ -124,7 +124,7 @@ class ProgressTests(unittest.TestCase):
         bugs[0]['metadata']['dailyBug']['blocker'] = {'kind': 'authorization_required', 'phase': 'test_deployment'}
         result = snapshot(scan, issues + bugs)
         self.assertEqual((result['repair']['state'], result['repair']['completed']), ('blocked', 0))
-        self.assertIn('保留受阻证据，未全部合并项不上线且不自动补验收', result['nextAction'])
+        self.assertIn('受阻项单列保留证据，不自动补验收', result['nextAction'])
         self.assertIn('该批次仍停在阻塞位置', result['nextAction'])
         self.assertIn('完整交付 0/1', str(board.progress_rows(result)))
         scan['metadata']['dailyBatch']['state'] = 'paused'
@@ -147,7 +147,7 @@ class ProgressTests(unittest.TestCase):
             deliveredBugIds=['bug-second'], completedDeliveries=[receipt(bugs[1])])
         result = snapshot(scan, issues + bugs)
         self.assertEqual((result['repair']['state'], result['repair']['completed']), ('completed_with_blocked', 1))
-        self.assertIn('保留受阻证据，未全部合并的受阻项不上线，仅真人明确要求恢复时续作', result['nextAction'])
+        self.assertIn('受阻项单列保留证据，仅真人明确要求恢复时续作', result['nextAction'])
 
     def test_blocked_history_does_not_reclassify_a_fully_merged_bug_in_stage_output(self):
         row = candidate('bug', 'waiting_repair')
@@ -170,7 +170,7 @@ class ProgressTests(unittest.TestCase):
         for text in [board.render_markdown(result, NOW), board.render_slack(result, NOW), html]:
             self.assertIn('受阻留档 1 项', text)
             self.assertNotIn('已归不上线', text)
-        self.assertIn('未全部合并的受阻项不上线', stages['nextAction'])
+        self.assertIn('受阻项单列保留证据', stages['nextAction'])
 
     def test_registration_mismatch_or_wrong_scope_cannot_be_successful_zero(self):
         for mutation in ('missing', 'scope', 'paused'):

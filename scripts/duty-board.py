@@ -36,7 +36,7 @@ FOLLOW_UP_FIELDS = {'intercom': ('judgedThrough', 'csInformedAt', 'csInformedPar
                     'canny': ('judgedThrough', 'baselineScore', 'respondedCommentId')}
 STATE_LABELS = {
     'rejected': '⛔ 不上线', 'released': '🟢 已上线',
-    'review': '⚪ 待审', 'pr_closed': '⚠️ PR 已关闭未合并', 'fixing': '🔧 修复中', 'blocked': '🚧 受阻',
+    'review': '⚪ 待审查', 'pr_closed': '⚠️ PR 已关闭未合并', 'fixing': '🔧 修复中', 'blocked': '🚧 受阻',
 }
 
 
@@ -160,7 +160,9 @@ def bug_state(prs, rejected, blocked=False):
     # 上线按关联 PR 全部 merged 判断；历史驳回标记不覆盖实际合并结果。
     if prs and all(pr['state'] == 'merged' for pr in prs):
         return 'released'
-    if rejected or blocked:
+    if blocked:
+        return 'blocked'
+    if rejected:
         return 'rejected'
     if not prs:
         return 'fixing'
@@ -185,12 +187,13 @@ def scan_warnings(scan):
 
 
 def _layers(bugs):
-    alive = [bug for bug in bugs if bug['state'] != 'rejected']
+    alive = [bug for bug in bugs if bug['state'] not in {'rejected', 'blocked'}]
     return {
         'confirmed': len(bugs),
-        'rejected': len(bugs) - len(alive),
+        'blocked': sum(1 for bug in bugs if bug['state'] == 'blocked'),
+        'rejected': sum(1 for bug in bugs if bug['state'] == 'rejected'),
         'shouldShip': len(alive),
-        'delivered': sum(1 for bug in bugs if bug['prs']),
+        'delivered': sum(1 for bug in bugs if bug['prs'] and bug['state'] != 'blocked'),
         'merged': sum(1 for bug in alive if bug['state'] == 'released'),
         'released': sum(1 for bug in alive if bug['state'] == 'released'),
         'notified': sum(1 for bug in alive if bug.get('notify') == 'sent'),
@@ -273,6 +276,8 @@ def _age(since, now):
 
 
 def _pr_links(bug):
+    if bug['state'] == 'blocked':
+        return '未交付（历史 PR 见任务）' if bug['prs'] else '未交付'
     return '、'.join(f"[{pr['repo'].split('/')[-1]}#{pr['number']}]({pr['url']})" for pr in bug['prs']) or '–'
 
 
@@ -304,8 +309,7 @@ def notify_label(bug, now):
 
 
 def attention(board, now):
-    items = {'notify': [], 'responded': [], 'review': [], 'pr_closed': [], 'unrejectable': [], 'fixing': [],
-             'blocked': []}
+    items = {'notify': [], 'responded': [], 'review': [], 'pr_closed': [], 'unrejectable': [], 'fixing': []}
     for bug in board['bugs']:
         state = bug['state']
         follow = bug.get('followUp') or {}
@@ -316,10 +320,10 @@ def attention(board, now):
         elif state == 'review':
             created = min((pr['createdAt'] for pr in bug['prs'] if pr['state'] == 'open'), default=None)
             items['review'].append((bug, _age(created, now)))
-        elif state in ('pr_closed', 'fixing', 'blocked'):
+        elif state in ('pr_closed', 'fixing'):
             items[state].append((bug, None))
         # 只提醒已有 PR 或已交付却缺交付链接的真实台账缺口；排队、修复中尚未发消息属正常。
-        if (not bug.get('deliveryPermalink') and state != 'rejected'
+        if (not bug.get('deliveryPermalink') and state not in {'rejected', 'blocked'}
                 and (bug.get('prs') or bug.get('delivered'))):
             items['unrejectable'].append((bug, None))
     return items
@@ -327,7 +331,7 @@ def attention(board, now):
 
 ATTENTION_TITLES = {
     'notify': '已上线待回告', 'responded': '已回告有新回应', 'review': '待审 PR', 'pr_closed': 'PR 已关闭未合并且未标 🚫',
-    'fixing': '已确认尚无 PR', 'unrejectable': '无交付消息，无法用 🚫 标注', 'blocked': '修复受阻待解除',
+    'fixing': '已确认尚无 PR', 'unrejectable': '无交付消息，无法用 🚫 标注',
 }
 
 
@@ -340,14 +344,14 @@ def attention_notes(board, now):
     return [attention_line(key, entries) for key, entries in attention(board, now).items() if entries]
 
 
-FUNNEL_HEADER = ['扫描日（反馈日）', '采集', '疑似候选', '确认可修', '不上线', '应上线', '已交付 PR', '已合并', '已上线', '已回告', '用户回应']
+FUNNEL_HEADER = ['扫描日（反馈日）', '采集', '疑似候选', '确认可修', '受阻', '不上线', '应上线', '已交付 PR', '已合并', '已上线', '已回告', '用户回应']
 
 
 def funnel_cells(board, row):
     scanned = row.get('scanned', True)
     intake = [_num(row['collected'], scanned), _suspected(row, scanned)]
     cells = [row['label'], *intake]
-    cells += [str(row[key]) for key in ('confirmed', 'rejected', 'shouldShip', 'delivered', 'merged', 'released')]
+    cells += [str(row[key]) for key in ('confirmed', 'blocked', 'rejected', 'shouldShip', 'delivered', 'merged', 'released')]
     return cells + [str(row['notified']), str(row['responded'])]
 
 
@@ -355,6 +359,8 @@ def bug_status_text(bug):
     state = STATE_LABELS[bug['state']]
     if bug['state'] == 'rejected':
         state += f"：{(bug.get('rejection') or {}).get('reason') or '原因未填'}"
+    elif bug['state'] == 'blocked':
+        state += f"：{bug.get('blockedReason') or '原因未填'}"
     return state
 
 
@@ -441,7 +447,8 @@ def render_markdown(board, now):
     lines += ['', '### 数据说明', ''] + [f'- {warning}' for warning in board['warnings']] + [
         '- 确认可修：按所属扫描批次统计，方案后续被驳回仍计入；范围外批次不回溯计入。',
         '- 已上线：关联 PR 全部为 merged；部分合并、待审或关闭未合并不算已上线。',
-        '- 不上线：关联 PR 尚未全部合并，且修复受阻或审查人在 Bug 交付 thread 上点 🚫；保留受阻原因或审查回复，不自动补验收。',
+        '- 受阻：关联 PR 尚未全部合并且修复受阻；单列保留原因与证据，不计应上线或已交付 PR，不自动补验收或催办。',
+        '- 不上线：审查人在 Bug 交付 thread 上点 🚫；受阻项单列，已全部合并仍按已上线统计。',
         f'- 已回告：台账有发送记录；用户回应：Intercom 须 CS 回复确实告知客户已修复上线后，客户再有消息才算。'
         f'Canny 由看板 Agent 按语义判断回告后的新评论是否为客户回应，票数变化只作参考。从回告起跟踪 {FOLLOW_UP_DAYS} 天；Facebook 不跟踪回应。']
     return '\n'.join(lines) + '\n'
@@ -709,9 +716,9 @@ def collect(args, now):
         bug['prs'] = [github.pr(url) for url in board.get('prs') or []]
         blocked = daily_bug.get('state') == 'blocked'
         bug['state'] = bug_state(bug['prs'], False, blocked)
-        # 受阻默认不上线，已合并仍按事实记上线；两者都不依赖历史 Slack 消息是否仍存在。
-        if bug['state'] == 'rejected':
-            bug['rejection'] = {'reason': (daily_bug.get('blocker') or {}).get('reason') or '修复受阻，本项不上线'}
+        # 真实受阻单列，历史草稿 PR 不算交付；已合并仍按事实记上线，均不依赖旧 Slack 消息。
+        if bug['state'] == 'blocked':
+            bug['blockedReason'] = (daily_bug.get('blocker') or {}).get('reason') or '修复受阻，保留现场'
         elif bug['state'] != 'released' and bug['deliveryPermalink']:
             try:
                 bug['rejection'] = rejection(slack_thread(args.slack_cli, bug['deliveryPermalink']), args.reviewer)
@@ -857,7 +864,7 @@ RECORD_GROUPS = (('需要关注', ('verification_blocked', 'confirmed', 'duplica
                  ('非 Bug', ('product_decision', 'non_bug')))
 DEFAULT_RECORD_STATE = 'verification_blocked'
 TODO_TAGS = {'notify': 'notify', 'responded': 'released', 'review': 'review',
-             'pr_closed': 'rejected', 'fixing': 'review', 'unrejectable': 'review', 'blocked': 'notify'}
+             'pr_closed': 'rejected', 'fixing': 'review', 'unrejectable': 'review'}
 
 
 def _bug_note(bug, now, ages):
@@ -865,6 +872,8 @@ def _bug_note(bug, now, ages):
         return notify_label(bug, now)
     if bug['state'] == 'rejected':
         return (bug.get('rejection') or {}).get('reason') or '原因未填'
+    if bug['state'] == 'blocked':
+        return bug.get('blockedReason') or '原因未填'
     return ages.get(bug['identifier'], '')
 
 
@@ -977,6 +986,8 @@ def _html_bugs(payload):
         for bug in bugs:
             origin = ' · '.join(filter(None, [bug['source'], f"{bug['scanDate'][5:]} 扫描" if bug['scanDate'] else '', f"{bug['feedbackDate'][5:]} 反馈"]))
             prs = ' · '.join([_a(pr['label'], pr['url']) for pr in bug['prs']]) or '–'
+            if state == 'blocked':
+                prs = '未交付（历史 PR 见任务）' if bug['prs'] else '未交付'
             tag_kind = {'released': 'released', 'rejected': 'rejected'}.get(state)
             note = _tag(tag_kind, bug['note']) if tag_kind and bug['note'] else _h(bug['note'])
             rows.append(f'<div class="bug">{_a(bug["identifier"], bug["url"])}<div>{_h(bug["summary"])}'
@@ -999,11 +1010,11 @@ def _html_trend(payload):
     def line(row, label, chart=True):
         scanned = row.get('scanned', True)
         cells = [label, _num(row['collected'], scanned), bar(row) if chart else '', _suspected(row, scanned),
-                 row['confirmed'], row['rejected'], row['released'], row['notified']]
+                 row['confirmed'], row['blocked'], row['rejected'], row['released'], row['notified']]
         return ''.join(f'<td>{cell if index == 2 else _h(cell)}</td>' for index, cell in enumerate(cells))
     body = ''.join(f'<tr>{line(row, row["label"])}</tr>' for row in rows)
     body += f'<tr class="total">{line(total, total["label"], chart=False)}</tr>'
-    head = ''.join(f'<th>{text}</th>' for text in ('扫描日（反馈日）', '采集', '采集 / 疑似', '疑似', '确认可修', '不上线', '已上线', '已回告'))
+    head = ''.join(f'<th>{text}</th>' for text in ('扫描日（反馈日）', '采集', '采集 / 疑似', '疑似', '确认可修', '受阻', '不上线', '已上线', '已回告'))
     return (f'<section class="widget full"><div class="head"><h2>每日趋势</h2><p>按所属扫描批次；范围外 Bug 不计入</p></div>'
             f'<div class="scroll"><table class="days"><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div></section>')
 
@@ -1061,7 +1072,7 @@ def _html_view(payload):
             + _html_todo(payload) + '</div>' + _html_progress(payload) + _html_bugs(payload)
             + _html_trend(payload) + _html_records(payload)
             + '<footer>已上线：关联 PR 全部 merged；确认可修按所属扫描批次统计，后续方案驳回仍计入。'
-            '不上线：关联 PR 尚未全部合并，且修复受阻或审查人在交付 thread 上点 🚫；保留证据，不自动补验收。</footer></div></main>')
+            '受阻项单列，不计应上线或已交付 PR；保留证据，不自动补验收。不上线：审查人在交付 thread 上点 🚫。</footer></div></main>')
 
 
 def _html_progress(payload):
