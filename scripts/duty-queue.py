@@ -155,7 +155,7 @@ def valid_failure_skip(item):
 
 
 def concluded(item):
-    """调查结论须有对应材料版本的已回读报告，并按结论类型具备依据。"""
+    """本轮处理须有对应版本的结论报告，或有界重试后保留的失败跳过记录。"""
     state = item.get('state')
     if state == 'skipped_failure':
         return valid_failure_skip(item)

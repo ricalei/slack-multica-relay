@@ -88,20 +88,23 @@ def lane_plan(scan, issues, active, *, round_id, current_issue, current_run, age
             live[lane['id']] = claim
     if len(set(live.values())) != len(live):
         raise Error('两个工位领取了同一候选，须核对后恢复')
+    recover_current = False
     if current_issue in live:
         if not handoff:
-            return {'action': 'investigate_candidate', 'laneIssueId': current_issue, 'candidateId': live[current_issue],
+            lane = next(row for row in lanes if row['id'] == current_issue)
+            settle = queue.meta(lane, 'dailyLane').get('failureHandoffCandidateId') == live[current_issue]
+            return {'action': 'settle_failure' if settle else 'investigate_candidate', 'laneIssueId': current_issue, 'candidateId': live[current_issue],
                     'total': len(rows), 'completed': len(rows) - len(pending), 'remaining': len(pending)}
         if queue.meta(scan, 'dailyExecution').get('investigationFailurePolicy') == queue.FAILURE_POLICY:
-            return {'action': 'recover_lane', 'issueIds': [current_issue],
-                    'total': len(rows), 'completed': len(rows) - len(pending), 'remaining': len(pending)}
-        raise Error('当前工位所领候选尚无有效结论；先保存结论或失败现场，不领取下一条')
+            recover_current = True
+        else:
+            raise Error('当前工位所领候选尚无有效结论；先保存结论或失败现场，不领取下一条')
     unclaimed = [key for key in order if key not in live.values()]
     claims, launches, released = [], [], []
     for lane in lanes:
         running = any(run['issue_id'] == lane['id'] for run in active)
         if lane['id'] in live:
-            if not running:
+            if not running or (recover_current and lane['id'] == current_issue):
                 launches.append(lane['id'])
             continue
         # 执行中的其它工位结论回读后会自己领下一条，这里只为调用者和空闲工位领取。
@@ -112,7 +115,7 @@ def lane_plan(scan, issues, active, *, round_id, current_issue, current_run, age
             launches.append(lane['id'])
         elif queue.meta(lane, 'dailyLane').get('state') != 'done':
             released.append(lane['id'])
-    return {'action': 'dispatch', 'claims': claims, 'issueIds': launches, 'released': released,
+    return {'action': 'recover_lane' if recover_current else 'dispatch', 'claims': claims, 'issueIds': launches, 'released': released,
             'total': len(rows), 'completed': len(rows) - len(pending), 'remaining': len(pending)}
 
 
@@ -281,7 +284,7 @@ class Native:
         if queue.meta(self.issue(issue_id), key) != value:
             raise Error('metadata 写后回读不一致，保留现场')
 
-    def save_skip(self, issue_id, item, *, allow_write):
+    def save_skip(self, issue_id, item, *, allow_write, before_write):
         """未知评论写入结果只回读；同一候选的跳过记录不得重复发送。"""
         def read():
             comments = self.call(['issue', 'comment', 'list', issue_id, '--full', '--compact'])
@@ -290,6 +293,7 @@ class Native:
         if read():
             return
         if allow_write:
+            before_write()
             content = (f"<!-- {queue.RECORD_MARKER} round={item['roundId']} candidate={item['candidateId']} -->\n"
                        '有限重试仍未形成调查结论，本轮跳过；过程保留，不计确认或排除。\n\n```json\n'
                        + json.dumps(item, ensure_ascii=False) + '\n```')
@@ -371,7 +375,7 @@ def launch(native, journal, issue_id, agent_id, runtime_id, *, successor=False, 
     return {'issueId': issue_id, 'runId': found[0]['id'], 'status': found[0]['status'], 'reused': False}
 
 
-def lane_launch(native, journal, row, candidate, item, scope, *, failing=False, now=None):
+def lane_launch(native, journal, row, candidate, item, scope, *, failing=False, recovering=False, now=None):
     """一条候选最多首次 + 两次重试。每次 intent 独立保存；未知启动结果不能消耗重试或跳过。"""
     base = f"{row['id']}:{candidate}"
     history = native.history(row['id'])
@@ -406,9 +410,13 @@ def lane_launch(native, journal, row, candidate, item, scope, *, failing=False, 
         elif run['status'] not in {'completed', 'failed'}:
             raise Error('运行取消或状态未知，保留人工决定，不能自动重试或跳过')
     # 只把可审计的失败调度记为跳过，原有报告/执行记录仍然保留，绝不伪造 Bug 结论。
+    if recovering:
+        # 真人 CLI 不能伪装 Agent 评论：仅排一次留档交接运行，不再重试调查。
+        lane = queue.meta(native.issue(row['id']), 'dailyLane')
+        native.metadata(row['id'], 'dailyLane', {**lane, 'failureHandoffCandidateId': candidate})
+        return launch(native, journal, row['id'], scope['agent_id'], scope['runtime_id'], key=base + ':settle')
     key = base + ':skip'
     intent = journal.data.get(key)
-    allow_write = intent is None
     if intent is None:
         failure = item.get('executionFailure') or {}
         reason = failure.get('error') or failure.get('reason') or '运行结束但未形成有效调查结论，有限重试已耗尽'
@@ -420,7 +428,11 @@ def lane_launch(native, journal, row, candidate, item, scope, *, failing=False, 
         intent = {'item': skipped}
         journal.data[key] = intent
         journal.save()
-    native.save_skip(row['id'], intent['item'], allow_write=allow_write)
+    def before_write():
+        intent['sendAttempted'] = True
+        journal.save()
+    native.save_skip(row['id'], intent['item'], allow_write=intent.get('sendAttempted') is not True,
+                     before_write=before_write)
     return {'issueId': row['id'], 'candidateId': candidate, 'skipped': True, 'runIds': attempts}
 
 
@@ -450,7 +462,7 @@ def advance(native, journal, scope, now=None, *, recovering=False):
             lane = queue.meta(native.issue(claim['laneId']), 'dailyLane')
             native.metadata(claim['laneId'], 'dailyLane', {**lane, 'state': 'investigating',
                                                            'currentCandidateId': claim['candidateId'],
-                                                           'claimedAt': stamp})
+                                                           'claimedAt': stamp, 'failureHandoffCandidateId': None})
             claimed[claim['laneId']] = claim['candidateId']
         except Error as error:
             errors.append({'issueId': claim['laneId'], 'reason': str(error)})
@@ -472,7 +484,8 @@ def advance(native, journal, scope, now=None, *, recovering=False):
                     item = next(queue.meta(value, 'dailyInvestigation') for value in rows
                                 if queue.meta(value, 'dailyInvestigation')['candidateId'] == candidate)
                     receipt = lane_launch(native, journal, row, candidate, item, scope,
-                                          failing=result['action'] == 'recover_lane', now=now)
+                                          failing=result['action'] == 'recover_lane' and issue_id == scope['current_issue'],
+                                          recovering=recovering, now=now)
                     if receipt.get('skipped'):
                         skipped.append(receipt)
                     else:
@@ -497,10 +510,12 @@ def advance(native, journal, scope, now=None, *, recovering=False):
                                    key=f"{issue_id}:finalize:{scope['current_run']}" if finalize else None))
         except Error as error:
             errors.append({'issueId': issue_id, 'reason': str(error)})
-    if skipped and not errors:
+    if skipped:
         # 最多两个工位各跳过当前一条；重新按最新评论规划，让空位立即领取下一条或交回汇总。
         following = advance(native, journal, scope, now, recovering=recovering)
-        return {**following, 'receipts': receipts + following.get('receipts', []),
+        return {**following, 'action': 'attention' if errors else following['action'],
+                'receipts': receipts + following.get('receipts', []),
+                'errors': errors + following.get('errors', []),
                 'skipped': skipped + following.get('skipped', [])}
     if result['action'] == 'recover_lane' and not errors:
         result['action'] = 'dispatch'

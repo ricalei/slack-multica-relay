@@ -164,7 +164,7 @@ python3 <同一临时目录>/duty-dispatch.py advance \
   --round-id <原扫描 UUID> --current-issue <当前 Issue UUID> --current-run <当前真实 run UUID>
 ```
 
-`plan` 与 `advance` 返回 protocolVersion=2。**开工 plan 只读核对，不派发、没有 receipts。工位收到 `investigate_candidate` 时只调查其中的 candidateId；收到其它结果说明本工位没有在查的候选，直接 advance。**只有交接 advance 才执行真实写入并返回 receipts：
+`plan` 与 `advance` 返回 protocolVersion=2。**开工 plan 只读核对，不派发、没有 receipts。工位收到 `investigate_candidate` 时只调查其中的 candidateId；收到 `settle_failure` 时仅调用 advance 留档并接续，不再执行调查；收到其它结果说明本工位没有在查的候选，直接 advance。**只有交接 advance 才执行真实写入并返回 receipts：
 
 - `register_round`：留在原扫描完成登记。
 - `dispatch`：调度器已为空闲工位和当前工位各领取一条未领候选（写入 `dailyLane.currentCandidateId`），并给当前工位排一个后继运行；清单已领完的工位标为 done。核对 receipts 后结束当前运行，不占着名额等待其它工位。当前候选没有有效结论但有具体失败记录时，调度器给同一候选排最多 2 次重试；耗尽后追加 skipped_failure 并释放工位领下一条。空闲工位上已结束却没有结论的运行也走相同有界恢复；不把 run completed 当成调查完成。
@@ -174,7 +174,7 @@ python3 <同一临时目录>/duty-dispatch.py advance \
 
 工位运行只写自己的结论记录与报告；不写父扫描的 dailyRound、dailyBatch、dailyDispatch、最终分类索引、台账或 Slack 汇总，所有共享调度由同 Runtime 的短锁串行执行。工位后继以每个候选首次加最多 2 次重试为上限；同一候选不清零重试计数，不是无限 rerun。原扫描**仅在调查交接阶段**准备退出前重新调用 advance；已经接管汇总、建立固定修复队列或排入首个 Bug 后，按串行修复接续退出，不再调用调查调度器。
 
-异常退出后如果另一个工位仍在运行，它的 advance 会回读并恢复空闲工位。两张工位都已退出时，在真人明确恢复该轮的授权下，导出该轮固定版本脚本，以同一作用域调用 `duty-dispatch.py recover --round-id <原扫描 UUID> --current-issue <无活动运行的工位 UUID>`，其余 server/workspace/project/agent/runtime/revision 参数同上，不传 current-run。recover 不采集、不重建清单，不接受仍有活动运行的目标工位，不清理 journal；只对已证实的结束运行安排剩余重试，启动结果不明则保留 intent。恢复后由工位自身留档与交接，不新增周期巡检。
+异常退出后如果另一个工位仍在运行，它的 advance 会回读并恢复空闲工位。两张工位都已退出时，在真人明确恢复该轮的授权下，导出该轮固定版本脚本，以同一作用域调用 `duty-dispatch.py recover --round-id <原扫描 UUID> --current-issue <无活动运行的工位 UUID>`，其余 server/workspace/project/agent/runtime/revision 参数同上，不传 current-run。recover 不采集、不重建清单，不接受仍有活动运行的目标工位，不清理 journal；只对已证实的结束运行安排剩余重试；三次调查均已结束时，仅排一次 settle_failure 交接运行，由 Agent 留档后接下一条，不再调查，也不以真人身份伪装结论作者。启动结果不明则保留 intent。恢复后由工位自身留档与交接，不新增周期巡检。
 
 逐条调查轮次使用同一调度器：`dispatch` 补足最多两条未结束调查并启动，其余返回值含义同上；调查任务只写自身过程、报告与结论。
 
