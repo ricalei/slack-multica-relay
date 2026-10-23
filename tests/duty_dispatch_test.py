@@ -57,6 +57,12 @@ class FakeNative:
         self.writes.append((key, name))
         next(row for row in self.data['issues'] if row['id'] == key)['metadata'][name] = value
 
+    def save_skip(self, issue_id, item, *, allow_write):
+        row = next(row for row in self.data['issues'] if row['id'] == issue_id)
+        from duty_queue_test import comment
+        row['_comments'].append(comment(dispatch.queue.RECORD_MARKER, item, at='2026-10-23T10:00:00Z'))
+        self.writes.append((issue_id, 'failureSkip'))
+
     def concurrency(self, limit):
         self.limits.append(limit)
         self.data['agent']['max_concurrent_tasks'] = limit
@@ -420,6 +426,141 @@ class LaneDispatchTests(unittest.TestCase):
             dispatch.plan(data, **SCOPE)
 
 
+class LaneFailureTests(LaneDispatchTests):
+    def start(self, keys=('a', 'b', 'c')):
+        data = lane_snapshot(list(keys))
+        data['issues'][0]['metadata']['dailyExecution']['investigationFailurePolicy'] = dispatch.queue.FAILURE_POLICY
+        native = FakeNative(data)
+        self.advance(native)
+        return native
+
+    def failed_scope(self, native):
+        latest = native.history('lane-1')[-1]
+        for value in native.data['runs']:
+            if value['issue_id'] == 'lane-1':
+                value['status'] = 'running' if value['id'] == latest['id'] else 'completed'
+        lane = self.lane(native, 1)
+        from duty_queue_test import comment
+        item = candidate('a', 'investigating')['metadata']['dailyInvestigation']
+        item.update(executionFailure={'kind': 'source_access_failed', 'error': 'channel_not_found'},
+                    nextAction='恢复线程访问或取得安全对象 ID 后续查')
+        lane['_comments'].append(comment(dispatch.queue.RECORD_MARKER, item, at='2026-10-23T09:00:00Z'))
+        return {**SCOPE, 'current_issue': 'lane-1', 'current_run': latest['id']}
+
+    def test_failure_retries_twice_then_skips_and_claims_next_without_blocking_other_lane(self):
+        native = self.start()
+        for attempt in range(2):
+            scope = self.failed_scope(native)
+            result = self.advance(native, scope)
+            self.assertEqual((result['action'], native.starts.count('lane-1')), ('dispatch', attempt + 2))
+            self.assertEqual(self.lane(native, 1)['metadata']['dailyLane']['currentCandidateId'], 'intercom:a')
+            # 同一次失败交接重复调用，复用同一个排队重试。
+            self.advance(native, scope)
+            self.assertEqual(native.starts.count('lane-1'), attempt + 2)
+        scope = self.failed_scope(native)
+        result = self.advance(native, scope)
+        self.assertEqual(result['action'], 'dispatch')
+        self.assertEqual(native.starts.count('lane-1'), 4)  # 三次 a，接着 c。
+        self.assertEqual(self.lane(native, 1)['metadata']['dailyLane']['currentCandidateId'], 'intercom:c')
+        self.assertEqual(self.lane(native, 2)['metadata']['dailyLane']['currentCandidateId'], 'intercom:b')
+        self.assertEqual(native.starts.count('lane-2'), 1)
+        rows, pending = dispatch.queue.round_candidates(native.data['issues'][0], native.data['issues'], 'agent')
+        skipped = rows[0]['metadata']['dailyInvestigation']
+        self.assertEqual(skipped['state'], 'skipped_failure')
+        self.assertEqual(len(skipped['failureSkip']['runIds']), 3)
+        self.assertEqual(skipped['failureSkip']['reason'], 'channel_not_found')
+        self.assertNotIn('verification', skipped)
+        self.assertEqual(len(pending), 2)
+        self.assertEqual(native.writes.count(('lane-1', 'failureSkip')), 1)
+
+    def test_other_lane_recovers_proven_finished_run_and_exhausted_crash_is_skipped(self):
+        native = self.start()
+        for attempt in range(3):
+            for value in native.data['runs']:
+                if value['issue_id'] == 'lane-1':
+                    value['status'] = 'failed'
+            self.advance(native)
+        rows, _ = dispatch.queue.round_candidates(native.data['issues'][0], native.data['issues'], 'agent')
+        item = rows[0]['metadata']['dailyInvestigation']
+        self.assertEqual(item['state'], 'skipped_failure')
+        self.assertEqual(self.lane(native, 1)['metadata']['dailyLane']['currentCandidateId'], 'intercom:c')
+        self.assertNotIn('investigationRecord', item)  # 崩溃无报告仍保留三次运行，不假造报告。
+
+    def test_unknown_start_never_retries_or_skips(self):
+        native = self.start()
+        native.failure = 'before'
+        scope = self.failed_scope(native)
+        self.assertEqual(self.advance(native, scope)['action'], 'attention')
+        for value in native.data['runs']:
+            if value['issue_id'] == 'lane-1':
+                value['status'] = 'completed'
+        self.assertEqual(self.advance(native)['action'], 'attention')
+        self.assertEqual(native.starts.count('lane-1'), 2)
+        self.assertNotIn(('lane-1', 'failureSkip'), native.writes)
+
+    def test_retry_timeout_with_real_run_is_reused(self):
+        native = self.start()
+        native.failure = 'after'
+        scope = self.failed_scope(native)
+        self.assertEqual(self.advance(native, scope)['action'], 'dispatch')
+        self.advance(native, scope)
+        self.assertEqual(native.starts.count('lane-1'), 2)
+
+    def test_unrecorded_live_failure_cannot_release_or_retry(self):
+        native = self.start()
+        native.data['runs'][1]['status'] = 'running'
+        scope = {**SCOPE, 'current_issue': 'lane-1', 'current_run': native.data['runs'][1]['id']}
+        result = self.advance(native, scope)
+        self.assertEqual(result['action'], 'attention')
+        self.assertEqual(native.starts.count('lane-1'), 1)
+
+    def test_recover_requires_idle_target_and_preserves_collection_receipts(self):
+        native = self.start()
+        recovery = {**SCOPE, 'current_issue': 'lane-1', 'current_run': None}
+        with self.assertRaises(dispatch.Error):
+            dispatch.advance(native, dispatch.Journal(self.root / 'journal.json'), recovery, recovering=True)
+        native.data['runs'][1]['status'] = 'completed'
+        before = copy.deepcopy(native.data['issues'][0]['metadata']['dailyScan'])
+        result = dispatch.advance(native, dispatch.Journal(self.root / 'journal.json'), recovery, recovering=True)
+        self.assertEqual(result['action'], 'dispatch')
+        self.assertEqual(native.starts.count('lane-1'), 2)
+        self.assertEqual(native.data['issues'][0]['metadata']['dailyScan'], before)
+        with self.assertRaises(dispatch.Error):
+            dispatch.advance(native, dispatch.Journal(self.root / 'journal.json'), recovery, recovering=True)
+
+    def test_manual_cancel_is_preserved_instead_of_retried(self):
+        native = self.start()
+        native.data['runs'][1]['status'] = 'cancelled'
+        result = self.advance(native)
+        self.assertEqual(result['action'], 'attention')
+        self.assertEqual(native.starts.count('lane-1'), 1)
+
+    def test_last_failed_candidate_returns_to_finalizer_after_skip(self):
+        native = self.start(('a',))
+        for attempt in range(3):
+            scope = self.failed_scope(native)
+            result = self.advance(native, scope)
+        self.assertEqual(result['action'], 'finalize_round')
+        self.assertEqual(native.starts.count('lane-1'), 3)
+        self.assertEqual(native.starts[-1], 'scan')
+
+    def test_skip_comment_unknown_result_is_not_sent_again(self):
+        native = self.start()
+        for attempt in range(2):
+            self.advance(native, self.failed_scope(native))
+        scope = self.failed_scope(native)
+        calls = []
+        def fail(issue_id, item, *, allow_write):
+            calls.append(allow_write)
+            raise dispatch.Error('评论结果不明')
+        with patch.object(native, 'save_skip', side_effect=fail):
+            self.assertEqual(self.advance(native, scope)['action'], 'attention')
+            self.assertEqual(self.advance(native, scope)['action'], 'attention')
+        self.assertEqual(calls, [True, False])
+        self.assertEqual(native.starts.count('lane-1'), 3)
+
+
+
 class ReleaseRepairTests(unittest.TestCase):
     def test_waiting_round_is_started_only_after_the_other_batch_finishes(self):
         data = lane_snapshot(['a'])
@@ -442,6 +583,22 @@ class ReleaseRepairTests(unittest.TestCase):
 
 
 class NativeTests(unittest.TestCase):
+    def test_skip_comment_preserves_content_and_requires_agent_authored_readback(self):
+        from duty_queue_test import comment
+        native = dispatch.Native(['multica'], 'project', 'agent')
+        item = {'roundId': 'scan', 'candidateId': 'intercom:a', 'state': 'skipped_failure'}
+        saved = comment(dispatch.queue.RECORD_MARKER, item)
+        with patch.object(native, 'call', side_effect=[[], {}, [saved]]) as call:
+            native.save_skip('lane-1', item, allow_write=True)
+        args, content = call.call_args_list[1].args
+        self.assertIn('--content-stdin', args)
+        self.assertIn('```json\n', content)
+        member_comment = comment(dispatch.queue.RECORD_MARKER, item, author='member')
+        with patch.object(native, 'call', return_value=[member_comment]) as call:
+            with self.assertRaises(dispatch.Error):
+                native.save_skip('lane-1', item, allow_write=False)
+        self.assertTrue(all('add' not in entry.args[0] for entry in call.call_args_list))
+
     def test_all_project_pages_are_required_before_agent_run_snapshot(self):
         native = dispatch.Native(['multica'], 'project', 'agent')
         with patch.object(native, 'call', side_effect=[

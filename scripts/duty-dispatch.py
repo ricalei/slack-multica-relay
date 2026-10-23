@@ -92,6 +92,9 @@ def lane_plan(scan, issues, active, *, round_id, current_issue, current_run, age
         if not handoff:
             return {'action': 'investigate_candidate', 'laneIssueId': current_issue, 'candidateId': live[current_issue],
                     'total': len(rows), 'completed': len(rows) - len(pending), 'remaining': len(pending)}
+        if queue.meta(scan, 'dailyExecution').get('investigationFailurePolicy') == queue.FAILURE_POLICY:
+            return {'action': 'recover_lane', 'issueIds': [current_issue],
+                    'total': len(rows), 'completed': len(rows) - len(pending), 'remaining': len(pending)}
         raise Error('当前工位所领候选尚无有效结论；先保存结论或失败现场，不领取下一条')
     unclaimed = [key for key in order if key not in live.values()]
     claims, launches, released = [], [], []
@@ -140,7 +143,7 @@ def issue_plan(scan, issues, active, *, round_id, current_issue, current_run, ag
 
 
 def plan(snapshot, *, round_id, current_issue, current_run, agent_id, project_id,
-         workspace_id, runtime_id, revision, handoff=False):
+         workspace_id, runtime_id, revision, handoff=False, recovering=False):
     agent, issues, runs = snapshot['agent'], snapshot['issues'], snapshot['runs']
     if (agent.get('id') != agent_id or agent.get('workspace_id') != workspace_id
             or agent.get('runtime_id') != runtime_id or agent.get('max_concurrent_tasks') not in (1, 2)):
@@ -159,7 +162,13 @@ def plan(snapshot, *, round_id, current_issue, current_run, agent_id, project_id
         raise Error('当前任务归属已改变')
     active = [run for run in runs if run.get('status') in queue.IN_FLIGHT]
     own = [run for run in active if run.get('id') == current_run]
-    if (len(own) != 1 or own[0].get('issue_id') != current_issue
+    if recovering:
+        if (not queue.lane_store(scan) or current_issue == round_id or current_run is not None
+                or queue.meta(by_id[current_issue], 'dailyLane').get('roundId') != round_id
+                or any(run.get('issue_id') == current_issue for run in active)
+                or queue.meta(scan, 'dailyExecution').get('investigationFailurePolicy') != queue.FAILURE_POLICY):
+            raise Error('恢复只适用于已启用异常接续、且没有活动运行的本轮工位')
+    elif (len(own) != 1 or own[0].get('issue_id') != current_issue
             or own[0].get('agent_id') != agent_id or own[0].get('runtime_id') != runtime_id
             or own[0].get('workspace_id') != workspace_id or own[0].get('status') != 'running'):
         raise Error('调用者没有对应的真实执行中 run')
@@ -215,10 +224,10 @@ class Native:
     def __init__(self, cli, project_id, agent_id):
         self.cli, self.project_id, self.agent_id = cli, project_id, agent_id
 
-    def call(self, args):
+    def call(self, args, content=None):
         try:
             result = subprocess.run(self.cli + args + ['--output', 'json'], check=True,
-                                    capture_output=True, text=True, timeout=30)
+                                    capture_output=True, text=True, input=content, timeout=30)
             return json.loads(result.stdout)
         except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
             raise Error('Multica 操作未确认；只回读现场，不盲目重复写入') from error
@@ -271,6 +280,25 @@ class Native:
             pass
         if queue.meta(self.issue(issue_id), key) != value:
             raise Error('metadata 写后回读不一致，保留现场')
+
+    def save_skip(self, issue_id, item, *, allow_write):
+        """未知评论写入结果只回读；同一候选的跳过记录不得重复发送。"""
+        def read():
+            comments = self.call(['issue', 'comment', 'list', issue_id, '--full', '--compact'])
+            records = queue.comment_records({'id': issue_id, '_comments': comments}, queue.RECORD_MARKER, self.agent_id)
+            return any(value == item for _, value in records)
+        if read():
+            return
+        if allow_write:
+            content = (f"<!-- {queue.RECORD_MARKER} round={item['roundId']} candidate={item['candidateId']} -->\n"
+                       '有限重试仍未形成调查结论，本轮跳过；过程保留，不计确认或排除。\n\n```json\n'
+                       + json.dumps(item, ensure_ascii=False) + '\n```')
+            try:
+                self.call(['issue', 'comment', 'add', issue_id, '--content-stdin'], content)
+            except Error:
+                pass
+        if not read():
+            raise Error('失败跳过记录未回读，保留写入 intent；不得重复评论或释放工位')
 
     def assign_without_start(self, issue_id):
         try:
@@ -343,9 +371,62 @@ def launch(native, journal, issue_id, agent_id, runtime_id, *, successor=False, 
     return {'issueId': issue_id, 'runId': found[0]['id'], 'status': found[0]['status'], 'reused': False}
 
 
-def advance(native, journal, scope, now=None):
+def lane_launch(native, journal, row, candidate, item, scope, *, failing=False, now=None):
+    """一条候选最多首次 + 两次重试。每次 intent 独立保存；未知启动结果不能消耗重试或跳过。"""
+    base = f"{row['id']}:{candidate}"
+    history = native.history(row['id'])
+    attempts = []
+    for index in range(queue.RETRY_LIMIT + 1):
+        key = base if index == 0 else f'{base}:retry:{index}'
+        intent = journal.data.get(key)
+        if not intent:
+            return launch(native, journal, row['id'], scope['agent_id'], scope['runtime_id'],
+                          successor=row['id'] == scope['current_issue'], key=key)
+        if intent.get('runId'):
+            found = [run for run in history if run['id'] == intent['runId']]
+        else:
+            found = [run for run in history if run['id'] not in intent['beforeRunIds']]
+        if (len(found) != 1 or found[0].get('agent_id') != scope['agent_id']
+                or found[0].get('runtime_id') != scope['runtime_id']
+                or found[0].get('workspace_id') != scope['workspace_id']):
+            raise Error('候选启动 intent 未唯一确认，不能重试或跳过')
+        run = found[0]
+        if not intent.get('runId'):
+            journal.data[key] = {**intent, 'runId': run['id']}
+            journal.save()
+        attempts.append(run['id'])
+        if run['status'] in queue.IN_FLIGHT:
+            if not (failing and run['id'] == scope['current_run'] and run['status'] == 'running'):
+                return {'issueId': row['id'], 'runId': run['id'], 'status': run['status'], 'reused': True}
+            failure = item.get('executionFailure') or {}
+            if (not isinstance(failure, dict) or not queue.text(failure.get('kind'))
+                    or not queue.text(failure.get('error') or failure.get('reason'))
+                    or not queue.text(item.get('nextAction'))):
+                raise Error('当前调查未完成；先保存具体 executionFailure 和 nextAction，再交接有限重试')
+        elif run['status'] not in {'completed', 'failed'}:
+            raise Error('运行取消或状态未知，保留人工决定，不能自动重试或跳过')
+    # 只把可审计的失败调度记为跳过，原有报告/执行记录仍然保留，绝不伪造 Bug 结论。
+    key = base + ':skip'
+    intent = journal.data.get(key)
+    allow_write = intent is None
+    if intent is None:
+        failure = item.get('executionFailure') or {}
+        reason = failure.get('error') or failure.get('reason') or '运行结束但未形成有效调查结论，有限重试已耗尽'
+        resume = item.get('nextAction') or '核对留存运行中的失败位置，恢复依赖后在原候选继续验证'
+        skipped = {**item, 'state': 'skipped_failure', 'laneIssueId': row['id'], 'nextAction': resume,
+                   'failureSkip': {'retryLimit': queue.RETRY_LIMIT, 'runIds': attempts, 'reason': reason,
+                                   'resumeCondition': resume,
+                                   'skippedAt': (now or dt.datetime.now(dt.timezone.utc)).isoformat()}}
+        intent = {'item': skipped}
+        journal.data[key] = intent
+        journal.save()
+    native.save_skip(row['id'], intent['item'], allow_write=allow_write)
+    return {'issueId': row['id'], 'candidateId': candidate, 'skipped': True, 'runIds': attempts}
+
+
+def advance(native, journal, scope, now=None, *, recovering=False):
     snapshot = native.snapshot()
-    result = plan(snapshot, handoff=True, **scope)
+    result = plan(snapshot, handoff=True, recovering=recovering, **scope)
     if result['action'] in ('register_round', 'yield_to_finalizer'):
         return result
     round_id = scope['round_id']
@@ -362,7 +443,7 @@ def advance(native, journal, scope, now=None):
                 if lane.get('status') != 'done':
                     native.status(lane['id'], 'done')
     by_id = {row['id']: row for row in snapshot['issues']}
-    receipts, errors, claimed = [], [], {}
+    receipts, errors, claimed, skipped = [], [], {}, []
     stamp = (now or dt.datetime.now(dt.timezone.utc)).isoformat()
     for claim in result.get('claims', []):
         try:
@@ -384,10 +465,21 @@ def advance(native, journal, scope, now=None):
             continue
         try:
             row = by_id[issue_id]
-            if result['action'] == 'dispatch' and queue.meta(row, 'dailyLane'):
+            if result['action'] in {'dispatch', 'recover_lane'} and queue.meta(row, 'dailyLane'):
                 candidate = claimed.get(issue_id) or queue.meta(row, 'dailyLane').get('currentCandidateId')
-                receipts.append(launch(native, journal, issue_id, scope['agent_id'], scope['runtime_id'],
-                                       successor=issue_id == scope['current_issue'], key=f'{issue_id}:{candidate}'))
+                if queue.meta(by_id[round_id], 'dailyExecution').get('investigationFailurePolicy') == queue.FAILURE_POLICY:
+                    rows, _ = queue.round_candidates(by_id[round_id], snapshot['issues'], scope['agent_id'])
+                    item = next(queue.meta(value, 'dailyInvestigation') for value in rows
+                                if queue.meta(value, 'dailyInvestigation')['candidateId'] == candidate)
+                    receipt = lane_launch(native, journal, row, candidate, item, scope,
+                                          failing=result['action'] == 'recover_lane', now=now)
+                    if receipt.get('skipped'):
+                        skipped.append(receipt)
+                    else:
+                        receipts.append(receipt)
+                else:
+                    receipts.append(launch(native, journal, issue_id, scope['agent_id'], scope['runtime_id'],
+                                           successor=issue_id == scope['current_issue'], key=f'{issue_id}:{candidate}'))
                 continue
             if result['action'] == 'dispatch':
                 # 旧协议逐条调查任务：启动前按最新回读确认仍未完成。
@@ -405,6 +497,13 @@ def advance(native, journal, scope, now=None):
                                    key=f"{issue_id}:finalize:{scope['current_run']}" if finalize else None))
         except Error as error:
             errors.append({'issueId': issue_id, 'reason': str(error)})
+    if skipped and not errors:
+        # 最多两个工位各跳过当前一条；重新按最新评论规划，让空位立即领取下一条或交回汇总。
+        following = advance(native, journal, scope, now, recovering=recovering)
+        return {**following, 'receipts': receipts + following.get('receipts', []),
+                'skipped': skipped + following.get('skipped', [])}
+    if result['action'] == 'recover_lane' and not errors:
+        result['action'] = 'dispatch'
     # 调查运行不写这个共享字段；每次按完整事实重算，避免并发计数丢失。
     if result['action'] == 'dispatch':
         native.metadata(round_id, 'dailyDispatch', {
@@ -443,7 +542,7 @@ def release_repair(native, journal, *, agent_id, runtime_id, project_id):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('plan', 'advance', 'release-repair'))
+    parser.add_argument('command', choices=('plan', 'advance', 'recover', 'release-repair'))
     for name in ('server-url', 'workspace-id', 'project-id', 'agent-id', 'runtime-id'):
         parser.add_argument('--' + name, required=True)
     for name in ('round-id', 'current-issue', 'current-run', 'revision'):
@@ -457,16 +556,18 @@ def main():
         for value in ids:
             if re.fullmatch(r'[a-zA-Z0-9-]+', value) is None:
                 raise Error('作用域 ID 格式无效')
-        if args.command != 'release-repair' and not all(scope[key] for key in scope):
-            raise Error('plan/advance 必须提供轮次、当前任务、当前运行与固定版本')
+        required = [key for key in scope if key != 'current_run' or args.command != 'recover']
+        if args.command != 'release-repair' and not all(scope[key] for key in required):
+            raise Error('必须提供轮次、当前任务与固定版本；plan/advance 还必须提供当前运行')
         root = Path.home() / '.config/moego/daily-bug-duty/dispatch' / args.workspace_id / args.agent_id
         native = Native(['multica', '--server-url', args.server_url, '--workspace-id', args.workspace_id],
                         args.project_id, args.agent_id)
         with locked(root / (args.project_id + '.lock')):
             if args.command == 'plan':
                 result = plan(native.snapshot(), **scope)
-            elif args.command == 'advance':
-                result = advance(native, Journal(root / (args.round_id + '.json')), scope)
+            elif args.command in {'advance', 'recover'}:
+                result = advance(native, Journal(root / (args.round_id + '.json')), scope,
+                                 recovering=args.command == 'recover')
             else:
                 result = release_repair(native, Journal(root / 'release-repair.json'), agent_id=args.agent_id,
                                         runtime_id=args.runtime_id, project_id=args.project_id)

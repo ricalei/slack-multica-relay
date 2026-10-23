@@ -11,7 +11,7 @@ from pathlib import Path
 
 
 TERMINAL = {'delivered', 'duplicate', 'excluded', 'cs_followed', 'cancelled'}
-STATES = TERMINAL | {'ready', 'investigating', 'confirmed', 'waiting_repair', 'suspended_external', 'paused'}
+STATES = TERMINAL | {'ready', 'investigating', 'confirmed', 'waiting_repair', 'suspended_external', 'skipped_failure', 'paused'}
 FINISHED_BATCHES = {'completed', 'finished_with_skips'}
 STOPPED = {'cancelled', 'canceled', 'done'}
 IN_FLIGHT = {'queued', 'dispatched', 'running', 'waiting_local_directory'}
@@ -23,6 +23,8 @@ FIXABLE = {'confirmed', 'waiting_repair', 'delivered'}
 # 工位轮次：每轮固定两张调查工位卡，候选结论写在工位卡评论里，清单写在原扫描评论里。
 LANE_STORE = 'lane_comments'
 LANE_COUNT = 2
+FAILURE_POLICY = 'retry_2_then_skip_v1'
+RETRY_LIMIT = 2
 RECORD_MARKER = 'daily-investigation:v3'
 MANIFEST_MARKER = 'daily-round-manifest:v3'
 
@@ -139,9 +141,24 @@ def verified_record(record):
             and record.get('readbackHashVerified') is True)
 
 
+def valid_failure_skip(item):
+    """执行失败只结束本轮调度，不证明 Bug；完整保留三次运行与恢复位置。"""
+    skip = item.get('failureSkip')
+    if not isinstance(skip, dict):
+        return False
+    runs = skip.get('runIds')
+    return (skip.get('retryLimit') == RETRY_LIMIT and isinstance(runs, list)
+            and len(runs) == RETRY_LIMIT + 1 and all(text(key) for key in runs)
+            and len(set(runs)) == len(runs)
+            and all(text(skip.get(key)) for key in ('reason', 'resumeCondition', 'skippedAt'))
+            and text(item.get('nextAction')))
+
+
 def concluded(item):
     """调查结论须有对应材料版本的已回读报告，并按结论类型具备依据。"""
     state = item.get('state')
+    if state == 'skipped_failure':
+        return valid_failure_skip(item)
     record = item.get('investigationRecord') or {}
     done = (verified_record(record) and text(item.get('evidenceRevision'))
             and record.get('evidenceRevision') == item['evidenceRevision'])
@@ -238,6 +255,9 @@ def lane_round_candidates(scan, issues, agent_id):
         if (item.get('schemaVersion') != 1 or item.get('mode') != 'investigate'
                 or item.get('sourceScanId') != scan['id'] or item.get('state') not in STATES):
             raise QueueError('工位调查记录协议或状态无效')
+        if (item['state'] == 'skipped_failure'
+                and meta(scan, 'dailyExecution').get('investigationFailurePolicy') != FAILURE_POLICY):
+            raise QueueError('本轮未启用有限重试与失败跳过协议')
         if item['state'] in {'paused', 'cancelled'}:
             raise QueueError('本轮包含人工暂停或取消项，须核对决定，不能当作调查完成')
         row = {'id': record_id(scan['id'], entry['candidateId']), 'project_id': scan.get('project_id'),
