@@ -4,4 +4,6 @@
 
 从同一 origin/main SHA 导出 scripts/duty-board.py、scripts/duty-progress.py 与 scripts/duty-queue.py，展示已采集数量、调查留档与结论、完整修复交付进度、真实当前任务和下一步。最终台账尚未登记时也读取已有阶段事实，不把调查中、修复中或读取失败标为未扫描。
 
+受阻且尚未全部合并的 Bug 统一归“不上线”，保留证据，不催办解除或自动补验收。历史 Slack thread 缺失只记录脚本警告，继续发布可用结果。
+
 向 <交付频道 ID> 发送精简版，在消息 thread 上传完整 HTML，并在 GRM-665 追加完整版。正常同日已发布则复用回执；真人明确补发时按 instructions 的稳定请求 ID 去重，复用已有采集数据。保持 03:00 值守与 10:00 看板，不触发值守或重采 Facebook、Intercom。

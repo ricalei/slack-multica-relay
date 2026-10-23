@@ -124,7 +124,8 @@ class ProgressTests(unittest.TestCase):
         bugs[0]['metadata']['dailyBug']['blocker'] = {'kind': 'authorization_required', 'phase': 'test_deployment'}
         result = snapshot(scan, issues + bugs)
         self.assertEqual((result['repair']['state'], result['repair']['completed']), ('blocked', 0))
-        self.assertIn('等待当前任务所需授权', result['nextAction'])
+        self.assertIn('保留受阻证据，未全部合并项不上线且不自动补验收', result['nextAction'])
+        self.assertIn('该批次仍停在阻塞位置', result['nextAction'])
         self.assertIn('完整交付 0/1', str(board.progress_rows(result)))
         scan['metadata']['dailyBatch']['state'] = 'paused'
         self.assertIn('等待真人决定', snapshot(scan, issues + bugs)['nextAction'])
@@ -140,13 +141,36 @@ class ProgressTests(unittest.TestCase):
         result = snapshot(scan, issues + bugs)
         self.assertEqual((result['repair']['state'], result['repair']['completed'], result['repair']['blocked']),
                          ('repairing', 0, 1))
-        self.assertIn('固定队列第 2/2 项 · 受阻 1 项待解除', str(board.progress_rows(result)))
+        self.assertIn('固定队列第 2/2 项 · 受阻留档 1 项', str(board.progress_rows(result)))
         scan['metadata']['dailyBatch'].update(
             state='completed', outcome='finished_with_blocked', currentIssueId=None,
             deliveredBugIds=['bug-second'], completedDeliveries=[receipt(bugs[1])])
         result = snapshot(scan, issues + bugs)
         self.assertEqual((result['repair']['state'], result['repair']['completed']), ('completed_with_blocked', 1))
-        self.assertIn('受阻项', result['nextAction'])
+        self.assertIn('保留受阻证据，未全部合并的受阻项不上线，仅真人明确要求恢复时续作', result['nextAction'])
+
+    def test_blocked_history_does_not_reclassify_a_fully_merged_bug_in_stage_output(self):
+        row = candidate('bug', 'waiting_repair')
+        scan, issues = fixture([row], complete=True)
+        bugs = add_repair(scan, [row])
+        block(scan, bugs[0])
+        scan['metadata']['dailyBatch'].update(state='completed', outcome='finished_with_blocked',
+                                            currentIssueId=None, deliveredBugIds=[], blockedBugIds=[bugs[0]['id']])
+        stages = snapshot(scan, issues + bugs)
+        self.assertEqual((stages['repair']['completed'], stages['repair']['blocked']), (0, 1))
+        prs = [{'url': 'https://github.com/o/r/pull/1', 'repo': 'o/r', 'number': 1, 'state': 'merged'}]
+        detail = {'identifier': 'GRM-4', 'url': BASE + 'GRM-4', 'summary': '已合并的历史受阻项',
+                  'feedbackDate': '2026-10-21', 'investigationIssueId': row['id'], 'source': 'facebook',
+                  'prs': prs, 'state': board.bug_state(prs, False, blocked=True), 'rejection': None}
+        record = {'identifier': 'GRM-1', 'feedbackDate': '2026-10-21', 'createdAt': NOW.isoformat(),
+                  'collected': {'canny': 2, 'facebook': 1, 'intercom': 4}, 'progress': stages}
+        result = board.build_board([record], [detail], dt.date(2026, 10, 21), dt.date(2026, 10, 22))
+        self.assertEqual((result['total']['released'], result['total']['rejected']), (1, 0))
+        html = board.render_html(board.html_payload(result, NOW, None, '无索引'))
+        for text in [board.render_markdown(result, NOW), board.render_slack(result, NOW), html]:
+            self.assertIn('受阻留档 1 项', text)
+            self.assertNotIn('已归不上线', text)
+        self.assertIn('未全部合并的受阻项不上线', stages['nextAction'])
 
     def test_registration_mismatch_or_wrong_scope_cannot_be_successful_zero(self):
         for mutation in ('missing', 'scope', 'paused'):
