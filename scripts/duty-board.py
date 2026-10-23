@@ -355,8 +355,6 @@ def bug_status_text(bug):
     state = STATE_LABELS[bug['state']]
     if bug['state'] == 'rejected':
         state += f"：{(bug.get('rejection') or {}).get('reason') or '原因未填'}"
-    if bug.get('reviewUnknown'):
-        state += '（Slack 审查标记未核对）'
     return state
 
 
@@ -712,13 +710,11 @@ def collect(args, now):
         bug['state'] = bug_state(bug['prs'], False, blocked)
         # 受阻默认不上线，已合并仍按事实记上线；两者都不依赖历史 Slack 消息是否仍存在。
         if bug['state'] == 'rejected':
-            bug['rejection'] = {'reason': (daily_bug.get('blocker') or {}).get('reason') or '修复受阻，本项不上线',
-                                'source': 'blocked'}
+            bug['rejection'] = {'reason': (daily_bug.get('blocker') or {}).get('reason') or '修复受阻，本项不上线'}
         elif bug['state'] != 'released' and bug['deliveryPermalink']:
             try:
                 bug['rejection'] = rejection(slack_thread(args.slack_cli, bug['deliveryPermalink']), args.reviewer)
             except (subprocess.SubprocessError, OSError, ValueError, KeyError, TypeError):
-                bug['reviewUnknown'] = True
                 warnings.append(f"{bug['identifier']} Slack 交付 thread 读取失败，审查标记未核对；保留 PR 状态继续生成")
             bug['state'] = bug_state(bug['prs'], bug['rejection'] is not None)
         if bug['state'] == 'released':
@@ -868,8 +864,6 @@ def _bug_note(bug, now, ages):
         return notify_label(bug, now)
     if bug['state'] == 'rejected':
         return (bug.get('rejection') or {}).get('reason') or '原因未填'
-    if bug.get('reviewUnknown'):
-        return 'Slack 审查标记未核对'
     return ages.get(bug['identifier'], '')
 
 

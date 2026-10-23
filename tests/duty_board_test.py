@@ -286,7 +286,6 @@ class SlackReadResilienceTests(unittest.TestCase):
                     return []
                 board, threads = self.collect('delivered', {'one': pr('open')}, thread)
                 self.assertEqual([item['state'] for item in board['bugs']], ['review', 'review'])
-                self.assertTrue(board['bugs'][0]['reviewUnknown'])
                 self.assertIsNone(board['bugs'][0]['rejection'])
                 self.assertEqual((board['total']['confirmed'], board['total']['rejected']), (2, 0))
                 self.assertEqual(threads.call_count, 2)
@@ -294,7 +293,7 @@ class SlackReadResilienceTests(unittest.TestCase):
                 for render in (board_module.render_markdown, board_module.render_slack):
                     self.assertIn('B1 Slack 交付 thread 读取失败', render(board, NOW))
                 payload = board_module.html_payload(board, NOW, None, '无索引')
-                self.assertIn('Slack 审查标记未核对', board_module.render_html(payload))
+                self.assertIn('B1 Slack 交付 thread 读取失败，审查标记未核对', board_module.render_html(payload))
 
 
 class BoardTests(unittest.TestCase):

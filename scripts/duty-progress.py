@@ -92,11 +92,8 @@ def repair(scan, issues, investigated, members):
     if state == 'repairing' and (type(batch.get('index')) is not int
             or not 1 <= batch['index'] <= len(bugs) or current != bugs[batch['index'] - 1]['id']):
         raise queue.QueueError('固定修复游标与当前任务不一致')
-    current_bug = next((row for row in bugs if row['id'] == current), None)
-    blocker = (queue.meta(current_bug, 'dailyBug').get('blocker') or {}) if current_bug else {}
-    waiting_authorization = (isinstance(blocker, dict) and blocker.get('kind') == 'authorization_required')
     return {'state': state, 'completed': complete, 'blocked': blocked, 'total': len(bugs), 'index': batch.get('index'),
-            'currentIssueId': current, 'waitingAuthorization': waiting_authorization}, bugs
+            'currentIssueId': current}, bugs
 
 
 def snapshot(scan, issues, runs, now, issue_url_base, scan_record=None):
