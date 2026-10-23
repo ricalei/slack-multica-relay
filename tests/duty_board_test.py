@@ -204,12 +204,37 @@ class BugStateTests(unittest.TestCase):
         self.assertEqual(board_module.bug_state([pr('open'), pr('closed')], False), 'pr_closed')
         self.assertEqual(board_module.bug_state([], False), 'fixing')
 
-    def test_blocked_repair_is_not_for_release_unless_all_prs_are_merged(self):
-        self.assertEqual(board_module.bug_state([pr('open')], False, blocked=True), 'rejected')
-        self.assertEqual(board_module.bug_state([], False, blocked=True), 'rejected')
-        self.assertEqual(board_module.bug_state([pr('merged'), pr('open')], False, blocked=True), 'rejected')
+    def test_blocked_repair_has_its_own_state_unless_all_prs_are_merged(self):
+        self.assertEqual(board_module.bug_state([pr('open')], False, blocked=True), 'blocked')
+        self.assertEqual(board_module.bug_state([], False, blocked=True), 'blocked')
+        self.assertEqual(board_module.bug_state([pr('merged'), pr('open')], False, blocked=True), 'blocked')
         self.assertEqual(board_module.bug_state([pr('merged')], False, blocked=True), 'released')
-        self.assertEqual(board_module.bug_state([pr('open')], True, blocked=True), 'rejected')
+        self.assertEqual(board_module.bug_state([pr('open')], True, blocked=True), 'blocked')
+
+    def test_pending_review_and_blocked_are_separate_in_counts_and_all_views(self):
+        bugs = [bug('GRM-633', '2026-10-13', 'review'), bug('GRM-634', '2026-10-13', 'review'),
+                {**bug('GRM-1375', '2026-10-13', 'blocked'), 'blockedReason': '部署权限不足'},
+                {**bug('GRM-1377', '2026-10-13', 'blocked', []), 'blockedReason': '缺少验收身份'}]
+        scans = [{'identifier': 'S1', 'feedbackDate': '2026-10-13', 'createdAt': NOW.isoformat()}]
+        board = board_module.build_board(scans, bugs, dt.date(2026, 10, 13), dt.date(2026, 10, 14))
+        self.assertEqual(tuple(board['total'][k] for k in ['confirmed', 'blocked', 'rejected', 'shouldShip', 'delivered']),
+                         (4, 2, 0, 2, 2))
+        cells = dict(zip(board_module.FUNNEL_HEADER, board_module.funnel_cells(board, board['total'])))
+        self.assertEqual((cells['受阻'], cells['不上线'], cells['已交付 PR']), ('2', '0', '2'))
+        slack = board_module.render_slack(board, NOW)
+        self.assertIn('⚪ 待审查 2：', slack)
+        self.assertIn('🚧 受阻 2：', slack)
+        self.assertNotIn('⛔ 不上线', slack)
+        markdown = board_module.render_markdown(board, NOW)
+        self.assertIn('部署权限不足', markdown)
+        self.assertIn('未交付（历史 PR 见任务）', markdown)
+        payload = board_module.html_payload(board, NOW, None, '无索引')
+        self.assertEqual({row['identifier'] for row in payload['todo']}, {'GRM-633', 'GRM-634'})
+        html = board_module.render_html(payload)
+        self.assertIn('<th>受阻</th>', html)
+        self.assertIn('<h3>受阻 2</h3>', html)
+        self.assertIn('<h3>待审查 2</h3>', html)
+        self.assertIn('缺少验收身份', html)
 
 
 class SlackReadResilienceTests(unittest.TestCase):
@@ -257,18 +282,18 @@ class SlackReadResilienceTests(unittest.TestCase):
                 board, threads = self.collect('blocked', prs, thread)
                 first = board['bugs'][0]
                 merged = bool(prs) and all(item['state'] == 'merged' for item in prs.values())
-                self.assertEqual(first['state'], 'released' if merged else 'rejected')
+                self.assertEqual(first['state'], 'released' if merged else 'blocked')
                 self.assertEqual(len(first['prs']), len(prs))
                 self.assertEqual(board['warnings'], [])
                 threads.assert_called_once_with('slack', 'B2')
                 if merged:
                     continue
-                self.assertEqual((board['total']['confirmed'], board['total']['rejected'],
-                                  board['total']['shouldShip']), (2, 1, 1))
-                self.assertEqual(first['rejection']['reason'], '测试环境权限不足')
-                self.assertFalse(board_module.attention(board, NOW)['blocked'])
+                self.assertEqual((board['total']['confirmed'], board['total']['blocked'], board['total']['rejected'],
+                                  board['total']['shouldShip'], board['total']['delivered']), (2, 1, 0, 1, 1))
+                self.assertEqual(first['blockedReason'], '测试环境权限不足')
+                self.assertIsNone(first['rejection'])
                 self.assertEqual([item['identifier'] for item, _ in board_module.attention(board, NOW)['review']], ['B2'])
-                self.assertIn('⛔ 不上线 1：[B1]', board_module.render_slack(board, NOW))
+                self.assertIn('🚧 受阻 1：[B1]', board_module.render_slack(board, NOW))
                 self.assertIn('测试环境权限不足', board_module.render_markdown(board, NOW))
                 payload = board_module.html_payload(board, NOW, None, '无索引')
                 self.assertIn('测试环境权限不足', board_module.render_html(payload))
