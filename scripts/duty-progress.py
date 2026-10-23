@@ -152,7 +152,7 @@ def snapshot(scan, issues, runs, now, issue_url_base, scan_record=None):
     elif inv['state'] == 'attention' or fix['state'] == 'attention':
         next_action = '核对阶段证据或暂停现场，保留已有结果'
     elif fix['state'] == 'blocked':
-        next_action = '受阻项归不上线并保留证据，不自动补验收；该批次仍停在阻塞位置，接续状态待核对'
+        next_action = '保留受阻证据，未全部合并项不上线且不自动补验收；该批次仍停在阻塞位置，接续状态待核对'
     elif fix['state'] in {'paused', 'cancelled'}:
         next_action = '保留暂停或取消现场，等待真人决定后续范围'
     elif fix['state'] == 'not_needed':
@@ -160,7 +160,7 @@ def snapshot(scan, issues, runs, now, issue_url_base, scan_record=None):
     elif fix['state'] in {'completed', 'completed_with_skips'}:
         next_action = '工程处理已结束，按既有流程审查 PR 与交付报告'
     elif fix['state'] == 'completed_with_blocked':
-        next_action = '固定队列已结束；受阻项归不上线并保留证据，仅真人明确要求恢复时续作'
+        next_action = '固定队列已结束；保留受阻证据，未全部合并的受阻项不上线，仅真人明确要求恢复时续作'
     elif fix['state'] == 'repairing':
         next_action = '当前项完整验收交付后，串行继续固定修复队列'
     else:

@@ -390,7 +390,8 @@ def progress_rows(progress):
         else:
             fix_text += ' · ' + {'blocked': '修复受阻，详见当前任务', 'paused': '已暂停', 'cancelled': '已取消'}[fix['state']]
         if fix.get('blocked'):
-            fix_text += f" · 受阻 {fix['blocked']} 项已归不上线"
+            # 受阻回执是历史工程事实，当前是否已上线由 PR 状态判断，不能等同于不上线数。
+            fix_text += f" · 受阻留档 {fix['blocked']} 项"
     else:
         fix_text = {'not_started': '尚未开始，等待全轮调查与汇总', 'preparing': '固定修复清单登记中',
                     'not_needed': '本轮无新增可修项', 'attention': '交付证据或暂停现场待核对'}[fix['state']]
