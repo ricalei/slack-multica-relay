@@ -32,6 +32,22 @@ export function isSupportedMessage(event: SlackMessageEvent): boolean {
     && !['bot_message', 'message_changed', 'message_deleted'].includes(subtype ?? '');
 }
 
+export function isOwnerGroupWithoutSelfMention(
+  text: string,
+  senderUserId: string,
+  ownerSlackUserId: string,
+  targetSubteamIds: ReadonlySet<string>,
+): boolean {
+  if (senderUserId !== ownerSlackUserId) return false;
+  for (const match of text.matchAll(USER_MENTION)) {
+    if (match[1] === ownerSlackUserId) return false;
+  }
+  for (const match of text.matchAll(SUBTEAM_MENTION)) {
+    if (targetSubteamIds.has(match[1]!)) return true;
+  }
+  return false;
+}
+
 export interface SlackMessageEvent {
   type?: unknown;
   team?: unknown;

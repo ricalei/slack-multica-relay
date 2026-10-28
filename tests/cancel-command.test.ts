@@ -6,6 +6,7 @@ const baseEnv = {
   SLACK_SIGNING_SECRET: "test-secret",
   SLACK_TEAM_ID: "T1",
   SLACK_ALLOWED_CHANNEL_IDS: "C1",
+  RELAY_OWNER_SLACK_USER_ID: "U123",
   MULTICA_API_BASE_URL: "https://multica.test",
   MULTICA_API_TOKEN: "test",
   MULTICA_WORKSPACE_ID: "ws",
@@ -18,7 +19,6 @@ const baseEnv = {
   QSTASH_NEXT_SIGNING_KEY: "test",
   RELAY_CONSUMER_URL: "https://relay.test/api/queue/consume",
   SLACK_USER_TOKEN: "test-token",
-  SLACK_REACTION_NAME: "eyes",
   SLACK_TARGET_USER_IDS: "U123,U456",
   SLACK_TARGET_SUBTEAM_IDS: "S123",
 };
@@ -36,14 +36,13 @@ function matches(text: string, keywords?: string): boolean {
   );
 }
 
-describe("reaction token 选择", () => {
+describe("review reaction 清理身份", () => {
   it.each([
-    [" bot-token ", "user-token", "bot-token"],
-    ["bot-token", undefined, "bot-token"],
+    [" bot-token ", "user-token", "user-token"],
     [undefined, " user-token ", "user-token"],
     ["", "user-token", "user-token"],
     [" \n ", "user-token", "user-token"],
-  ])("bot 配置为 %j、user 配置为 %j 时选择 %s", (bot, user, expected) => {
+  ])("bot 配置为 %j、user 配置为 %j 时始终选择 %s", (bot, user, expected) => {
     const config = loadRelayConfig({
       ...baseEnv,
       SLACK_BOT_TOKEN: bot,
@@ -52,9 +51,9 @@ describe("reaction token 选择", () => {
     expect(config.slackReactionToken).toBe(expected);
   });
 
-  it("两种 token 均未配置时拒绝运行", () => {
+  it("即使有 bot token，缺少 user token 仍拒绝运行", () => {
     expect(() => loadRelayConfig({
-      ...baseEnv, SLACK_BOT_TOKEN: " ", SLACK_USER_TOKEN: " ",
+      ...baseEnv, SLACK_BOT_TOKEN: "bot-token", SLACK_USER_TOKEN: " ",
     })).toThrow("relay_not_configured");
   });
 });

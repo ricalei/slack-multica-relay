@@ -22,6 +22,7 @@ function response() {
 const env = {
   SLACK_SIGNING_SECRET: "test",
   SLACK_TEAM_ID: "T1",
+  RELAY_OWNER_SLACK_USER_ID: "U1",
   SLACK_TARGET_USER_IDS: "U1",
   SLACK_ALLOWED_CHANNEL_IDS: "C1",
   MULTICA_API_BASE_URL: "https://multica.test",
@@ -30,7 +31,6 @@ const env = {
   MULTICA_PROJECT_ID: "project",
   MULTICA_AGENT_ID: "agent",
   SLACK_USER_TOKEN: "test",
-  SLACK_REACTION_NAME: "eyes",
   KV_REST_API_URL: "https://kv.test",
   KV_REST_API_TOKEN: "test",
   QSTASH_TOKEN: "test",

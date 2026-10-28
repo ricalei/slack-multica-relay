@@ -2,6 +2,7 @@ import type { ApiConfig } from "./multica-api.js";
 export interface RelayConfig extends ApiConfig {
   signingSecret: string;
   teamId: string;
+  ownerSlackUserId: string;
   targetUserIds: Set<string>;
   targetSubteamIds: Set<string>;
   cancelKeywords: Set<string>;
@@ -11,8 +12,10 @@ export interface RelayConfig extends ApiConfig {
   allowedSenderIds: Set<string>;
   allowAllSenders: boolean;
   blockedSenderIds: Set<string>;
+  releaseApprovalChannelId?: string;
+  releaseApprovalAppId?: string;
+  releaseApprovalBotId?: string;
   slackReactionToken: string;
-  slackReactionName: string;
   kvRestApiUrl: string;
   kvRestApiToken: string;
   queueUrl: string;
@@ -30,6 +33,10 @@ export function loadRelayConfig(
   const blockedSenderIds = ids(env.SLACK_BLOCKED_SENDER_IDS);
   const targetUserIds = ids(env.SLACK_TARGET_USER_IDS);
   const targetSubteamIds = ids(env.SLACK_TARGET_SUBTEAM_IDS);
+  const releaseApproval = releaseApprovalConfig(env);
+  const ownerSlackUserId = required(env, "RELAY_OWNER_SLACK_USER_ID");
+  if (!/^[UW][A-Z0-9]+$/u.test(ownerSlackUserId))
+    throw new Error("invalid_identifier");
   if (!targetUserIds.size && !targetSubteamIds.size)
     throw new Error("missing_mention_target");
   const type = env.MULTICA_ASSIGNEE_TYPE?.trim() || "agent";
@@ -42,12 +49,14 @@ export function loadRelayConfig(
   return {
     signingSecret: required(env, "SLACK_SIGNING_SECRET"),
     teamId: required(env, "SLACK_TEAM_ID"),
+    ownerSlackUserId,
     allowedChannelIds: allowedChannels.ids,
     allowAllChannels: allowedChannels.all,
     blockedChannelIds,
     allowedSenderIds: allowedSenders.ids,
     allowAllSenders: allowedSenders.all,
     blockedSenderIds,
+    ...releaseApproval,
     targetUserIds,
     targetSubteamIds,
     cancelKeywords: cancelKeywords(env.SLACK_CANCEL_KEYWORDS),
@@ -59,12 +68,7 @@ export function loadRelayConfig(
     multicaAssigneeId: targetId,
     multicaThreadScopeId: scope,
     multicaLegacyAgentId: legacy,
-    slackReactionToken:
-      env.SLACK_BOT_TOKEN?.trim() || required(env, "SLACK_USER_TOKEN"),
-    slackReactionName: required(env, "SLACK_REACTION_NAME").replace(
-      /^:+|:+$/gu,
-      "",
-    ),
+    slackReactionToken: required(env, "SLACK_USER_TOKEN"),
     kvRestApiUrl: https(required(env, "KV_REST_API_URL")),
     kvRestApiToken: required(env, "KV_REST_API_TOKEN"),
     queueUrl: https(env.QSTASH_URL?.trim() || "https://qstash.upstash.io"),
@@ -87,6 +91,30 @@ function ids(value: string | undefined): Set<string> {
   if (values.some((x) => !/^[A-Z][A-Z0-9]+$/u.test(x)))
     throw new Error("invalid_identifier");
   return new Set(values);
+}
+
+function releaseApprovalConfig(env: NodeJS.ProcessEnv): {
+  releaseApprovalChannelId?: string;
+  releaseApprovalAppId?: string;
+  releaseApprovalBotId?: string;
+} {
+  const values = [
+    env.SLACK_RELEASE_APPROVAL_CHANNEL_ID?.trim(),
+    env.SLACK_RELEASE_APPROVAL_APP_ID?.trim(),
+    env.SLACK_RELEASE_APPROVAL_BOT_ID?.trim(),
+  ];
+  const configured = values.filter(Boolean);
+  if (!configured.length) return {};
+  if (
+    configured.length !== values.length ||
+    values.some((value) => !value || !/^[A-Z][A-Z0-9]+$/u.test(value))
+  )
+    throw new Error("invalid_release_approval_config");
+  return {
+    releaseApprovalChannelId: values[0],
+    releaseApprovalAppId: values[1],
+    releaseApprovalBotId: values[2],
+  };
 }
 function policyIds(value: string): { ids: Set<string>; all: boolean } {
   const normalized = value.trim();

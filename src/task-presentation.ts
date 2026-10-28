@@ -20,6 +20,19 @@ export function formatTaskTitle(
   event: SlackThreadEvent,
   scope: string,
 ): string {
+  if (event.taskType === "release_approval") {
+    const match = event.releaseApproval.prUrl.match(
+      /^https:\/\/github\.com\/[^/]+\/([^/]+)\/pull\/([1-9]\d*)$/u,
+    );
+    if (!match) throw new Error("invalid_event");
+    const identity = createHash("sha256")
+      .update(
+        `${scope}:${event.teamId}:${event.channelId}:release_approval:${event.releaseApproval.prUrl}`,
+      )
+      .digest("hex")
+      .slice(0, 16);
+    return `发布候选自动批准 · ${match[1]} #${match[2]} · ${event.releaseApproval.version} · [${identity}]`;
+  }
   const pr = event.text.match(
     /https:\/\/github\.com\/[^/\s<>|]+\/([^/\s<>|]+)\/pull\/(\d+)(?=[/?#\s<>|]|$)/,
   );
@@ -53,12 +66,34 @@ function clip(text: string, bytes: number): string {
 }
 
 export function compactEvent(event: SlackThreadEvent): SlackThreadEvent {
-  const rest: SlackThreadEvent = {
-    teamId: event.teamId, channelId: event.channelId,
-    messageTs: event.messageTs, threadTs: event.threadTs,
-    senderUserId: event.senderUserId, text: event.text,
-    mention: { type: event.mention.type, id: event.mention.id },
+  // Slack 入站字段不具有 Relay 元数据权限，只复制事件白名单。
+  const base = {
+    teamId: event.teamId,
+    channelId: event.channelId,
+    messageTs: event.messageTs,
+    threadTs: event.threadTs,
+    senderUserId: event.senderUserId,
+    text: event.text,
   };
+  const rest: SlackThreadEvent =
+    event.taskType === "release_approval"
+      ? {
+          ...base,
+          taskType: "release_approval",
+          operation: "dispatch",
+          releaseApproval: {
+            version: event.releaseApproval.version,
+            prUrl: event.releaseApproval.prUrl,
+            sourceAppId: event.releaseApproval.sourceAppId,
+            sourceBotId: event.releaseApproval.sourceBotId,
+          },
+        }
+      : {
+          ...base,
+          ...(event.taskType ? { taskType: event.taskType } : {}),
+          ...(event.operation ? { operation: event.operation } : {}),
+          mention: { type: event.mention.type, id: event.mention.id },
+        };
   if (event.files === undefined) return rest;
   const files = Array.isArray(event.files) ? event.files : [];
   return {
@@ -151,6 +186,13 @@ export interface RecoveredMessage {
   channelId: string;
   threadTs: string;
   messageTs: string;
+  taskType?: "mention_review" | "release_approval";
+  releaseApproval?: {
+    version: string;
+    prUrl: string;
+    sourceAppId: string;
+    sourceBotId: string;
+  };
 }
 
 export function readTaskMessage(description: string): RecoveredMessage {
@@ -188,6 +230,27 @@ export function readTaskMessage(description: string): RecoveredMessage {
     ) ||
     !/^\d+\.\d+$/.test(event.threadTs as string) ||
     !/^\d+\.\d+$/.test(event.messageTs as string)
+  )
+    throw new Error("invalid_thread_state");
+  if (event.taskType === "release_approval") {
+    const approval = event.releaseApproval;
+    if (
+      !object(approval) ||
+      typeof approval.version !== "string" ||
+      !/^v\d+\.\d+\.\d+$/u.test(approval.version) ||
+      typeof approval.prUrl !== "string" ||
+      !/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9]\d*$/u.test(
+        approval.prUrl,
+      ) ||
+      typeof approval.sourceAppId !== "string" ||
+      typeof approval.sourceBotId !== "string" ||
+      !/^[A-Z][A-Z0-9]+$/u.test(approval.sourceAppId) ||
+      !/^[A-Z][A-Z0-9]+$/u.test(approval.sourceBotId)
+    )
+      throw new Error("invalid_thread_state");
+  } else if (
+    event.taskType !== undefined &&
+    event.taskType !== "mention_review"
   )
     throw new Error("invalid_thread_state");
   return event as unknown as RecoveredMessage;

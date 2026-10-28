@@ -7,8 +7,13 @@ import {
   isCancelCommand,
   canCancelTask,
   isSupportedMessage,
+  isOwnerGroupWithoutSelfMention,
   type SlackMessageEvent,
 } from "./mentions.js";
+import {
+  findReleaseApproval,
+  type ReleaseApprovalMatch,
+} from "./release-approval.js";
 import {
   routeSlackThreadEvent,
   digest,
@@ -44,6 +49,33 @@ function record(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 function admitted(event: SlackThreadEvent, config: RelayConfig): boolean {
+  if (event.taskType === "release_approval") {
+    if (
+      event.teamId !== config.teamId ||
+      config.blockedChannelIds.has(event.channelId) ||
+      event.operation !== "dispatch" ||
+      event.threadTs !== event.messageTs
+    )
+      return false;
+    const current = findReleaseApproval(
+      {
+        type: "message",
+        channel: event.channelId,
+        user: event.senderUserId,
+        bot_id: event.releaseApproval.sourceBotId,
+        app_id: event.releaseApproval.sourceAppId,
+        ts: event.messageTs,
+        text: event.text,
+      },
+      config,
+    );
+    return (
+      current?.version === event.releaseApproval.version &&
+      current.prUrl === event.releaseApproval.prUrl &&
+      current.sourceAppId === event.releaseApproval.sourceAppId &&
+      current.sourceBotId === event.releaseApproval.sourceBotId
+    );
+  }
   return (
     event.teamId === config.teamId &&
     (config.allowAllChannels ||
@@ -60,7 +92,7 @@ function admitted(event: SlackThreadEvent, config: RelayConfig): boolean {
   );
 }
 function parsedEvent(value: unknown): SlackThreadEvent {
-  if (
+  const invalidBase =
     !record(value) ||
     ["teamId", "channelId", "senderUserId"].some(
       (k) =>
@@ -71,7 +103,30 @@ function parsedEvent(value: unknown): SlackThreadEvent {
       (k) =>
         typeof value[k] !== "string" || !/^\d+\.\d{1,6}$/u.test(value[k] as string),
     ) ||
-    typeof value.text !== "string" ||
+    typeof value.text !== "string";
+  if (invalidBase || !record(value)) throw new Error("invalid_event");
+  if (value.taskType === "release_approval") {
+    const approval = value.releaseApproval;
+    if (
+      value.operation !== "dispatch" ||
+      value.mention !== undefined ||
+      !record(approval) ||
+      typeof approval.version !== "string" ||
+      !/^v\d+\.\d+\.\d+$/u.test(approval.version) ||
+      typeof approval.prUrl !== "string" ||
+      !/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9]\d*$/u.test(
+        approval.prUrl,
+      ) ||
+      typeof approval.sourceAppId !== "string" ||
+      typeof approval.sourceBotId !== "string" ||
+      !/^[A-Z][A-Z0-9]+$/u.test(approval.sourceAppId) ||
+      !/^[A-Z][A-Z0-9]+$/u.test(approval.sourceBotId)
+    )
+      throw new Error("invalid_event");
+    return value as unknown as SlackThreadEvent;
+  }
+  if (
+    (value.taskType !== undefined && value.taskType !== "mention_review") ||
     (value.operation !== undefined &&
       value.operation !== "dispatch" &&
       value.operation !== "cancel") ||
@@ -81,6 +136,24 @@ function parsedEvent(value: unknown): SlackThreadEvent {
   )
     throw new Error("invalid_event");
   return value as unknown as SlackThreadEvent;
+}
+
+function releasePayload(
+  body: Record<string, unknown>,
+  event: SlackMessageEvent,
+  approval: ReleaseApprovalMatch,
+): SlackThreadEvent {
+  return parsedEvent({
+    taskType: "release_approval",
+    teamId: body.team_id,
+    channelId: event.channel,
+    messageTs: event.ts,
+    threadTs: event.ts,
+    senderUserId: event.user,
+    text: event.text,
+    operation: "dispatch",
+    releaseApproval: approval,
+  });
 }
 function reason(error: unknown): string {
   if (
@@ -174,11 +247,23 @@ export async function acceptSlack(
     return json({ challenge: body.challenge });
   if (
     body.type !== "event_callback" ||
-    !record(body.event) ||
-    !isSupportedMessage(body.event as SlackMessageEvent)
+    !record(body.event)
   )
     return json({ action: "ignored" });
-  const event = body.event;
+  const event = body.event as SlackMessageEvent;
+  const releaseApproval = findReleaseApproval(event, config);
+  if (releaseApproval) {
+    let payload: SlackThreadEvent;
+    try {
+      payload = releasePayload(body, event, releaseApproval);
+    } catch {
+      return json({ error: "invalid_event" }, 400);
+    }
+    if (!admitted(payload, config))
+      return json({ action: "ignored", reason: "not_allowed" });
+    return publish(payload, config, start, fetchImpl);
+  }
+  if (!isSupportedMessage(event)) return json({ action: "ignored" });
   const mention = findTargetMention(
     event.text as string,
     config.targetUserIds,
@@ -203,6 +288,13 @@ export async function acceptSlack(
   payload = compactEvent(payload);
   if (!admitted(payload, config))
     return json({ action: "ignored", reason: "not_allowed" });
+  if (isOwnerGroupWithoutSelfMention(
+    payload.text,
+    payload.senderUserId,
+    config.ownerSlackUserId,
+    config.targetSubteamIds,
+  ))
+    return json({ action: "ignored", reason: "self_group_ignored" });
   payload.operation = isCancelCommand(
     payload.text,
     config.targetUserIds,
@@ -216,6 +308,15 @@ export async function acceptSlack(
     !canCancelTask(payload.senderUserId, config.targetUserIds)
   )
     return json({ action: "ignored", reason: "cancel_not_allowed" });
+  return publish(payload, config, start, fetchImpl);
+}
+
+async function publish(
+  payload: SlackThreadEvent,
+  config: RelayConfig,
+  start: number,
+  fetchImpl: typeof fetch,
+): Promise<Response> {
   try {
     const response = await fetchImpl(
       config.queueUrl + "/v2/publish/" + config.consumerUrl,
@@ -298,15 +399,26 @@ export async function consumeQueue(
   }
   if (!admitted(event, config))
     return json({ action: "ignored", reason: "policy_changed" });
-  // 新消息保留入队时的指令分类，配置变更不能把排队中的取消变成启动任务。
-  event.operation ??= isCancelCommand(
-    event.text,
-    config.targetUserIds,
-    config.targetSubteamIds,
-    config.cancelKeywords,
+  if (
+    event.taskType !== "release_approval" &&
+    isOwnerGroupWithoutSelfMention(
+      event.text,
+      event.senderUserId,
+      config.ownerSlackUserId,
+      config.targetSubteamIds,
+    )
   )
-    ? "cancel"
-    : "dispatch";
+    return json({ action: "ignored", reason: "self_group_ignored" });
+  // 新消息保留入队时的指令分类，配置变更不能把排队中的取消变成启动任务。
+  if (event.taskType !== "release_approval")
+    event.operation ??= isCancelCommand(
+      event.text,
+      config.targetUserIds,
+      config.targetSubteamIds,
+      config.cancelKeywords,
+    )
+      ? "cancel"
+      : "dispatch";
   if (
     event.operation === "cancel" &&
     !canCancelTask(event.senderUserId, config.targetUserIds)

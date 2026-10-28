@@ -14,8 +14,8 @@
 
 - 在目标 Workspace 创建专用 Project 和 Agent，绑定需要使用的 Runtime。
 - 将 [AGENT-PROMPT.md](AGENT-PROMPT.md) 仅同步为 Slack Task Router 的 instructions。
-- 发布并绑定 [multica-final-reply](multica-skills/multica-final-reply/SKILL.md) 及业务所需 Skills。工具认证与权限按实际绑定 Skill 配置；频道和发送者准入由 Relay 统一校验。
-- 默认回复由 `multica-final-reply` 调用已绑定的 Slack Skill，以 User actor 发送到原 thread；凭据与身份预检遵循该 Slack Skill。启用下文可选 adapter 时，由 adapter 使用 `SLACK_USER_TOKEN` 发送。
+- 个人 Review 按 AGENT-PROMPT 加载本机业务 Skills，使用迁入本目录的隔离 reviewer。保留上游 multica-final-reply 供明确选择该发送方案的 Agent 使用，不与个人直接发送流程同时启用。频道和发送者准入由 Relay 统一校验。
+- 个人 Review 使用 `with-skill-env` 和 `moe-slack --as user` 在原 thread 回复；Bug Resolver 使用独立 Prompt 和 `--as bot`，不覆盖共享 User token。可选 adapter 必须替换而非叠加发送步骤，启用前核验对应 actor。
 - 回读 Agent 的 Runtime、权限和并发。初期并发2即可；Mac 休眠/断网会影响执行。
 - 读取本地 Skills 和 Workspace 指派 Skills 的实际加载结果。数据库 Skill 数量不能单独说明任务可用能力。
 - Relay 使用 MULTICA_PROJECT_ID/MULTICA_AGENT_ID 调用普通 Issue API；不再需要 Autopilot。
@@ -24,7 +24,7 @@ Agent instructions 写入任务工作目录 AGENTS.md。Multica daemon 为 Codex
 
 ### Slack Task Router 最终回复与模型来源
 
-[AGENT-PROMPT.md](AGENT-PROMPT.md) 指向 Router 已绑定的 `multica-final-reply`。默认由该 Skill 的 `scripts/run_context.py` 读取当前 run、所属 Agent 配置和运行日志，再按 [Footer 展示](multica-skills/multica-final-reply/references/footer-display.md) 通过 Slack Skill 发送；风格与表情沿用该 Skill 的 references。本地文件变更不会自动替换这些指令或线上绑定。
+个人 Review 的回复规则以 [AGENT-PROMPT.md](AGENT-PROMPT.md) 为准。以下上游采集器仅供选择 `multica-final-reply` 的 Agent 使用，由该 Skill 的 `scripts/run_context.py` 读取当前 run、所属 Agent 配置和运行日志，再按 [Footer 展示](multica-skills/multica-final-reply/references/footer-display.md) 通过 Slack Skill 发送；风格与表情沿用该 Skill 的 references。本地文件变更不会自动替换这些指令或线上绑定。
 
 采集器在隔离运行中使用 `MULTICA_SERVER_URL`、`MULTICA_WORKSPACE_ID` 和 `MULTICA_TASK_ID`。任务链接使用 Agent 环境中的 `FINAL_REPLY_APP_URL`（HTTPS 网页根地址）和 `FINAL_REPLY_WORKSPACE_SLUG`；可用已有详情通过 `--issue-identifier`、`--workspace-slug`、`--app-url` 显式传入。缺少链接信息时省略链接，继续回复。
 
@@ -32,15 +32,29 @@ Relay 仍在准备单条事件时，用现有 PAT 读取一次配置并冻结到
 
 ## 3. Slack App
 
-使用专用 App 或明确获准复用的 App 接收需要的 message 事件。私有频道订阅 `message.groups`，并将接收 App 加入指定频道。Relay 的 reaction 操作优先使用 `SLACK_BOT_TOKEN`，未配置时使用 `SLACK_USER_TOKEN`；添加、读取和删除始终使用选中的同一身份，API 调用失败不会切换到另一 token。Agent 回复仍使用获准的 owner USER token。验收时分别核对 reaction 所属身份和回复消息的 `user`。
+使用专用 App 或明确获准复用的 App 接收需要的 message 事件。私有频道订阅 `message.groups`，并将接收 App 加入指定频道。message 订阅也会送达 App/Bot 消息；Relay 默认拒绝，只有下述发布候选三元组和严格消息格式可以例外进入。Relay 不添加接单 reaction；Agent 核验 Slack 来源、Review/Approve 意图和唯一 PR 后，才使用获准的 owner USER 身份添加 `eyes`。非 Review mention 静默结束，不加 reaction、不回复“没有 PR”；Review 意图明确但 PR 不唯一时可澄清，目标固定前不加 `eyes`。Relay 仅在取消成功后使用同一用户的 `SLACK_USER_TOKEN` 读取和清理自己的 reaction；`SLACK_BOT_TOKEN` 不参与该路径。验收时核对 reaction 和回复消息的 `user` 都是 `U05GLCUAUTU`。
 
 配置 Request URL 为 `https://<当前部署>/api/slack/events`，对应 Signing Secret 填入部署环境。新增 scopes 后重新安装。只修改已授权用于 Relay 的 App。
 
-`SLACK_TEAM_ID` 必填，`SLACK_TARGET_USER_IDS` 和 `SLACK_TARGET_SUBTEAM_IDS` 至少一个必填；`SLACK_ALLOWED_CHANNEL_IDS` 必须显式填写逗号分隔的频道 ID 或 `all`，缺失或空值拒绝启动。`SLACK_BLOCKED_CHANNEL_IDS`、`SLACK_ALLOWED_SENDER_IDS` 和 `SLACK_BLOCKED_SENDER_IDS` 可选，黑名单优先于白名单。后续问答仍需再次 mention。
+`SLACK_TEAM_ID` 必填；`SLACK_TARGET_USER_IDS` 和 `SLACK_TARGET_SUBTEAM_IDS` 至少填一项。Relay 还必须配置单个 `RELAY_OWNER_SLACK_USER_ID`（当前为 `U05GLCUAUTU`），缺失或格式无效时拒绝启动。owner 只 @目标组、没有直接 @自己时，在入队前静默过滤，消费者也在访问 Redis/Multica 前复核。owner 直接 @自己时正常进入路由，即使同条消息也 @组；其他同事 @组及可信发布候选不受此门槛影响。该过滤不取消已启动任务，也不代替 Agent 对有效 Review 意图的判断。
+
+`SLACK_ALLOWED_CHANNEL_IDS` 必须显式填写频道 ID 或 `all`，缺失/空值拒绝启动。`SLACK_BLOCKED_CHANNEL_IDS`、`SLACK_ALLOWED_SENDER_IDS` 和 `SLACK_BLOCKED_SENDER_IDS` 可选，黑名单优先于白名单。后续问答仍需再次 mention。
+
+### 发布候选直接批准
+
+发布候选功能使用一组可选但不可拆分的配置：`SLACK_RELEASE_APPROVAL_CHANNEL_ID`、`SLACK_RELEASE_APPROVAL_APP_ID`、`SLACK_RELEASE_APPROVAL_BOT_ID`。三项全部留空表示关闭；只配置部分会使 Relay 拒绝启动。当前批准范围为频道 `C08HV4GTJ2D`、App `A080YA0KTJ9`、Bot `B081PVALKC0`，生产环境应把三项配置为 Secret 后重新部署。
+
+Relay 只接受该来源的顶层消息，且正文必须同时包含 `RELEASE APPROVAL REQUIRED`、`WAITING FOR APPROVAL`、唯一 `vX.Y.Z` 版本和唯一 `版本 PR` GitHub 链接；业务 PR、Changelog、Jira 和 Action link 不会成为目标。同一版本 PR 的多条通知汇聚到同一 Multica Issue，Agent 仍会检查当前 head 是否已有 Rica 的有效 APPROVED，避免重复写入。
+
+Agent 对此任务只读取 Slack 来源和 GitHub PR 元数据，不读取 diff、不启动 reviewer。核验后添加 `eyes`，直接 Approve 版本 PR，写后回读成功再添加 `a`；成功或失败均按 AGENT-PROMPT 在原 thread 简短说明实际结果。它不会评论业务代码、合并、启用 auto-merge、进入 merge queue、发布、创建 tag 或部署。部署验收不重放历史通知、不拿现有 PR 做写入测试；下一条真实发布候选是首次外部写入验收。
 
 ## 4. Vercel
 
 导入仓库，Framework 选 Other，安装使用 `pnpm install --frozen-lockfile`。入口位于 api/；vercel.json 设置消费函数60秒。配置环境变量，RELAY_CONSUMER_URL 必须是该部署的准确公网消费 URL。
+
+无效任务收口还需生成一枚独立随机 token，以 Secret 形式配置到 Vercel 的 `RELAY_IGNORE_TOKEN`，不得复用 `MULTICA_API_TOKEN`。同时在 Slack Task Router Agent 的 Secret 环境变量中配置相同的 `RELAY_IGNORE_TOKEN`，并配置 `RELAY_IGNORE_URL=https://<当前部署>/api/multica/ignore`。该接口只接受 Agent 已完成语义判断后的无效任务，校验 Issue、当前 run、项目和 Agent 归属后幂等标记 `done`；有效 Review/Approve 不调用。
+
+该个人收口接口当前只支持单 Agent；squad 模式拒绝，避免关闭共享任务。Vercel 路由已迁入，其他部署入口需按实际代码单独核对。
 
 不要把生产密钥配置到不可信分支的 Preview。若部署保护拦住 Slack/QStash，优先使用已配置的正式域名/生产部署；不要静默关闭项目全局保护。
 
@@ -83,7 +97,7 @@ EdgeOne Cloud Functions 会把 `Request.body` 暴露为解析值，入口通过 
 
 可选环境变量 `SLACK_CANCEL_KEYWORDS=cancel,取消`：未配置或空列表使用默认值；例如设置为 `stop,停止` 后只识别这两个词。取消权限直接复用 `SLACK_TARGET_USER_IDS`，用户组本身不授予权限。
 
-继续使用现有 message 事件订阅。选中的 `SLACK_BOT_TOKEN` 或 `SLACK_USER_TOKEN` 需要同时具有 `reactions:read`、`reactions:write`，且能访问目标频道。取消只清理该身份的表情，切换 token 身份前添加的其他身份表情保留。无需增加 reaction 事件订阅。
+继续使用现有 message 订阅。取消清理仅使用 Rica 的 SLACK_USER_TOKEN，不使用 Bot token；两端 User 身份须一致，其他身份的 reaction 保留。无需 reaction 事件订阅。
 
 在专用测试 thread 中启动任务，再由配置的用户回复 `@目标 取消`。检查运行状态变为 cancelled、原触发消息上所选 token 身份的 reaction 被清除、其他身份的 reaction 保留；已完成任务不应被改写或清理。取消结束后发送一条新的任务 mention，检查继续原卡。非授权用户发送取消指令应被忽略。
 
@@ -91,7 +105,7 @@ EdgeOne Cloud Functions 会把 `Request.body` 暴露为解析值，入口通过 
 
 ### Reaction token 配置迁移
 
-旧部署的 `SLACK_REACTION_READ_TOKEN`、`SLACK_REACTION_TOKEN` 不再被新版本读取。上线前配置 `SLACK_BOT_TOKEN`；若使用 user 身份，将原 owner token 配置为 `SLACK_USER_TOKEN` 并留空 bot token。新版本部署成功后再删除旧变量，以便旧部署在切换期间仍能运行。
+旧部署的 `SLACK_REACTION_READ_TOKEN`、`SLACK_REACTION_TOKEN`、`SLACK_REACTION_NAME` 不再读取。上线前配置 Rica User 的 `SLACK_USER_TOKEN`；Bot token 保留供独立 Bug Resolver 回复使用。新部署成功后才清理旧变量，保留回滚能力。
 
 ## 单条事件与可靠交付
 
@@ -103,7 +117,7 @@ Relay 将当前 mention 转交给 Agent，上下文由 Agent 按现有 Prompt �
 
 ## 可选确定性回复 adapter
 
-默认的最终回复 Skill 保持原 Slack 发送流程。需要代码渲染和持久发送去重时，将最终发送步骤替换成 `scripts/slack-reply.py`；只用一个入口，不再同时调用 Slack Skill 的 send。
+个人 Review 默认按 AGENT-PROMPT 的 Slack 发送流程。需要代码渲染和持久发送去重时，将最终发送步骤替换成 `scripts/slack-reply.py`；只用一个入口，不再同时调用 Slack Skill 的 send。
 
 在 Agent Runtime 创建 owner-only 的私有 JSON，填写从 CLI 核对的真实 ID 和 server 地址，例如：
 
@@ -140,3 +154,7 @@ adapter 在私有 JSON 旁的 `.slack-reply-state/` 保存 owner-only ledger，�
 HTTP 429 或 JSON `rate_limited`/`ratelimited` 表示该次发送被限流，ledger 记为 `rate_limited` 并保存 `Retry-After` 对应的 `retryAt`。CLI 返回 `slack_rate_limited`、`retryable: true` 和 `retry_after_seconds`；调用方等待后重新执行同一发送命令，等待期内 adapter 不调用 Slack，到期后可再次发送，无需手动清 ledger。缺失或无效的 Retry-After 采用 60 秒冷却；CLI 不自行睡眠或循环。回读时遇到限流仅要求延后回读，原 `accepted`/`attempting` 状态保持不变。
 
 复制脚本、修改文档或合入 PR 都不会自动启用 adapter。采用后需同步最终回复指令并回读绑定，再以新任务验证一次发送和后续重试。adapter 成功不代表业务任务已经完成。
+
+## Rica Bug Resolver 接入状态
+
+本次迁移未部署。app_mention 类型与按 @Rbot 的独立 Agent 路由仍需实现；不要只把 Bot User ID 加入现有 Review targets，否则普通 message 路径可能把 Bug 请求发给 Review Agent。具体实施与验收矩阵见 [准备记录](docs/bug-resolver-readiness.md)。当前 Rbot 继续 HTTP Events，不切 Socket Mode。
