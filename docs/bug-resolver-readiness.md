@@ -8,7 +8,7 @@
 - Agent：[MoeGo Bug Resolver](https://multica.ai/fintech-bff-duty/agents/b198894c-31f5-4ecb-ac84-4a4a6f90abb9?view=instructions)，ID `b198894c-31f5-4ecb-ac84-4a4a6f90abb9`；创建回读状态 `idle`，私有，最大并发 2，模型继承本机 Runtime 配置。
 - Project：`MoeGo Bug Resolver 任务看板`，ID `4e5fa137-7111-4355-82db-25268033f6a3`；独立于每日错误分诊看板。
 - Runtime：本机在线 Codex `b80bb51d-56ae-4e89-b984-cec79b53dee3`，codex-cli 0.147.0 / app-server。使用 Runtime 本地已安装 Skills；未复制外置凭据到 Agent 配置或仓库。
-- Prompt：线上全文与提交 `b817c5a` 中 `BUG-RESOLVER-PROMPT.md` 逐字一致；SHA-256 `676d431eb0bdc8916760acfc509550f5ea4968b0e53a33e4a28bb67775f0f2de`。
+- Prompt：线上全文与提交 `3beda32` 中 `BUG-RESOLVER-PROMPT.md` 逐字一致；已补 Relay-owned eyes 说明，SHA-256 `cf78a01678f46d78ada15f95fecad4f774d385d82c4eb9fb6f2bf154cf39a330`。
 - 可在 Multica 左上角选择 **FinTech → 智能体 → MoeGo Bug Resolver** 找到。Agent 创建与配置已确认，Slack 两路分流已部署，实际 Runtime 只读探针已通过；真实 Slack 建卡与回报已由 FBD-12 验证；具体 Bug 的业务验收仍待实际任务验证。
 
 ## 本轮结果
@@ -138,4 +138,6 @@ GitNexus 基于当前工作树生成索引，并核对 HTTP 接收对 Vercel、E
 - Rica 要求收到 @Rbot 后有图标反馈。Bug consumer 在任务/后续消息持久化后，使用经 auth.test 核验的 Rbot 身份，将 eyes 加到触发消息；Review 维持 Agent-owned reaction。
 - 同一消息重投不重加，取消与忽略事件不加；发送在已有 thread lock 内完成，避免本地取消清理与新增反馈交错。Slack 响应未知时不自动重发；best effort 反馈缺失不影响已交付任务。
 - 新增 13 项行为用例：首批原代码 11 项失败、1 项通过；独立审查另复现了 receipt 耗尽总时限后锁清理失败导致 503 的问题，修复后该项先红后绿。锁释放单独保留 2 秒预算与 owner 校验；业务/receipt 仍受原 45 秒总时限约束。最终完整 TypeScript 303 项 / Python 225 项及类型检查通过。
-- 该增量的生产部署和真实接单 reaction 验收待发布后补记。
+- 2026-10-28 19:12（上海），源码 `3beda32` 已发布为 `dpl_EEQKUKPEwuRdNtUZnW2nbJ1ATi3v` 并 promote 到既有正式入口；健康 200、未签名 401、候选签名 challenge 回显均通过。回滚目标为上版 `dpl_5tyHxqCfqguFZnEFsWiJ7zewYNgW`，无需改环境变量。线上 Agent 已回读新 Prompt 一致；真实接单 reaction 已由 FBD-14 验证：用户 19:12:47 发送测试消息，19:12:48 自动建卡，回读触发消息存在一个 eyes，唯一添加者为 Rbot `U0AM1GJ8GMQ`。
+
+- 实测任务：[FBD-14](https://multica.ai/fintech-bff-duty/issues/01a18236-734c-7d2d-8e81-d84b8fa83ef1)。来源消息、冻结 Bug payload、项目/Agent 指派与 reaction 身份已逐项一致性核对；仅验证接单图标，不据此声称业务 Bug 验收完成。
