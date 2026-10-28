@@ -1,6 +1,6 @@
 # Rica Bug Resolver：迁移结果与接入缺口
 
-核对日期：2026-10-28。本次改动已提交、推送并创建 [PR #1](https://github.com/ricalei/slack-multica-relay/pull/1)；PR 建立后已在 FinTech 工作区创建独立 Resolver 和任务看板，并回读确认。2026-10-28 18:46（上海）已将既有 Rbot HTTP Relay 正式入口切换到新版并回读部署 ID；真实 Slack 入站接单与 Bot 回报仍待一条用户测试消息验收。源参考：[MoeGo Bug Resolver](https://multica.devops.moego.dev/grm/agents/dae9afb3-720b-4a3b-879c-cd63821bd0b2?view=instructions)。
+核对日期：2026-10-28。本次改动已提交、推送并创建 [PR #1](https://github.com/ricalei/slack-multica-relay/pull/1)；PR 建立后已在 FinTech 工作区创建独立 Resolver 和任务看板，并回读确认。2026-10-28 18:46（上海）已将既有 Rbot HTTP Relay 正式入口切换到新版并回读部署 ID；真实 Slack 只读验收 FBD-12 随后完成建卡、正确指派和原 thread Bot 回报；业务 Bug 修复与公开报告仍按具体任务验收。源参考：[MoeGo Bug Resolver](https://multica.devops.moego.dev/grm/agents/dae9afb3-720b-4a3b-879c-cd63821bd0b2?view=instructions)。
 
 ## FinTech 智能体创建回执
 
@@ -9,7 +9,7 @@
 - Project：`MoeGo Bug Resolver 任务看板`，ID `4e5fa137-7111-4355-82db-25268033f6a3`；独立于每日错误分诊看板。
 - Runtime：本机在线 Codex `b80bb51d-56ae-4e89-b984-cec79b53dee3`，codex-cli 0.147.0 / app-server。使用 Runtime 本地已安装 Skills；未复制外置凭据到 Agent 配置或仓库。
 - Prompt：线上全文与提交 `b817c5a` 中 `BUG-RESOLVER-PROMPT.md` 逐字一致；SHA-256 `676d431eb0bdc8916760acfc509550f5ea4968b0e53a33e4a28bb67775f0f2de`。
-- 可在 Multica 左上角选择 **FinTech → 智能体 → MoeGo Bug Resolver** 找到。Agent 创建与配置已确认，Slack 两路分流已部署，实际 Runtime 只读探针已通过；真实 Slack 建卡与回报、具体 Bug 的业务验收仍待验证。
+- 可在 Multica 左上角选择 **FinTech → 智能体 → MoeGo Bug Resolver** 找到。Agent 创建与配置已确认，Slack 两路分流已部署，实际 Runtime 只读探针已通过；真实 Slack 建卡与回报已由 FBD-12 验证；具体 Bug 的业务验收仍待实际任务验证。
 
 ## 本轮结果
 
@@ -84,8 +84,8 @@ GrowthBook 已依据本机 Skill 的 `.env.example` 第 7 行补齐公司自托�
 1. **已完成事件准入与分路。** `app_mention` / `message` 统一处理；显式 @Rbot 优先进入 Bug Resolver，@Rica/@fintech-front-end 与可信发布候选保留 Review。两路使用独立任务映射与队列串行范围；Review 旧 scope 不变。
 2. **已完成恢复与取消回归。** 验签后生成路由及目标指纹，排队后配置变化不会改投其他 Agent；同 ts 双事件共用去重键。Bug 取消仅允许原请求者/owner，Bot 身份清理；建卡响应丢失与插入 follow-up 的恢复用例已覆盖。
 3. **已创建并绑定 FinTech Resolver。** 复用上文 Agent / Project / Runtime，生产环境已添加独立 Bug 目标和显式 Bot Token；不覆盖原 User Token 或 Review 目标。Agent 展示描述的源值为：`调查并修复 Bug，完成跨平台验证、任务分支 PR 和公开验收报告；通过 Slack @Rbot 接单。`；仅更新描述，不改 Prompt。
-4. **已完成候选检查与正式入口切换。** 保持 Rbot HTTP Events 和现有 Request URL，生产 alias 已回读到候选部署，保留旧部署回滚入口。精确生产 Token 已在候选验证两个工作区的 Issue 搜索；建卡写权限和真实 Slack 回报仍待实际入站消息证明。
-5. **下一步完成真实 Slack 与业务验收。** 先由用户发送一条只读 @Rbot 验收消息，核对一条消息只建一张 FinTech 卡、指派 Resolver、同 thread Bot 回报；随后选择实际测试 Bug 验证调查、修复、任务分支 push、PR、测试部署、动态验收和公开 Site。ELK 新来源、Android SDK 36、Go/Bazel 等平台缺口按实际任务补齐。
+4. **已完成候选检查与正式入口切换。** 保持 Rbot HTTP Events 和现有 Request URL，生产 alias 已回读到候选部署，保留旧部署回滚入口。精确生产 Token 已在候选验证两个工作区的 Issue 搜索；实际入站消息 FBD-12 已证明生产 Token 建卡、正确指派与同 thread Bot 回报。
+5. **接单验收完成，业务验收随具体 Bug 执行。** 用户实际发送的只读 @Rbot 消息对应一张 FinTech 卡，指派 Resolver，并收到同 thread Bot 回复；Review 工作区无对应任务。接下来选择实际测试 Bug 验证调查、修复、任务分支 push、PR、测试部署、动态验收和公开 Site。ELK 新来源、Android SDK 36、Go/Bazel 等平台缺口按实际任务补齐。
 
 代码回归已覆盖仅 app_mention、仅 message、同 ts 双投递、同 thread 两路、owner 仅 @组、可信发布、未知路由、无权取消、配置变化和写结果不明后的取消恢复。Runtime 离线恢复、Slack 发送结果不明后回读和 Sites 发布仍需真实运行证据，不由 fake 测试代替。
 
@@ -105,7 +105,7 @@ Node 24.18.0 / pnpm 10.34.5，`pnpm install --frozen-lockfile`；迁移前先观
 
 当前新增 20 项行为测试先失败后通过；完整回归为 290 项 TypeScript、225 项 Python，`pnpm lint` 与 `git diff --check` 通过。覆盖同 ts 双事件只有一张卡、同 thread 两路独立、混合 mention 只选 Bot、伪造元数据无效、配置改变不改投、非请求者取消不污染后续事件、owner/请求者取消使用 Bot 清理身份。Review 旧队列与原 scope 保持兼容。
 
-GitNexus 基于当前工作树生成索引，并核对 HTTP 接收对 Vercel、EdgeOne、Cloudflare 适配器的调用影响；图有流程裁剪，未用缺失边代替代码核对。Vercel 上传 dry-run 发现本地审计目录会被包含，已增加 `.vercelignore` 排除；上传前已重跑并确认 97 个文件中没有私有审计或凭据内容。部署状态和实际 Runtime 探针见本页回执；真实 Slack 入站验证仍待用户测试消息，不由单元测试推断完整链路成功。
+GitNexus 基于当前工作树生成索引，并核对 HTTP 接收对 Vercel、EdgeOne、Cloudflare 适配器的调用影响；图有流程裁剪，未用缺失边代替代码核对。Vercel 上传 dry-run 发现本地审计目录会被包含，已增加 `.vercelignore` 排除；上传前已重跑并确认 97 个文件中没有私有审计或凭据内容。部署状态和实际 Runtime 探针见本页回执；真实 Slack 入站验证见下方 FBD-12 回执，不由单元测试推断业务闭环成功。
 
 独立复核发现并修复了建卡响应丢失时的 requester 取消恢复问题：使用 POST 前冻结的 root envelope 核验发起人，再进入已有取消状态机；取消待恢复时的 follow-up 不覆盖取消意图。Bug payload 显式使用 `taskType=bug_resolver`，旧消费者会拒绝该类型，回滚不会把混合 mention 误投 Review。修复后独立复核无新的明确阻塞。
 
@@ -122,4 +122,13 @@ GitNexus 基于当前工作树生成索引，并核对 HTTP 接收对 Vercel、E
 - 候选五项检查通过：health 200、未签名请求 401、签名 challenge 回显一致、Review 与 Bug 合成取消请求均 200 ignored。两条隔离 Redis 状态没有 Issue 映射，未创建任务、取消真实运行或调用 Slack。
 - promote 后正式域名回读部署 ID 一致，health 200，未签名请求 401。此回执证明部署和 HTTP/鉴权边界，不代表真实 Slack E2E。
 - 回滚部署：`dpl_ibauKtmcLb9nf3cxpkdZgau2Ey83`。需要回滚时用 Vercel promote 指定该部署；Bug 的 `bug_resolver` payload 会被旧消费者拒绝，不能误投 Review，恢复新版后需核对并补处理这些排队事件。
-- 真实用户 @Rbot 消息尚未提供；实际建卡写权限、Slack 订阅送达、Bot 原 thread 回复与去重的线上验收保持待完成。
+- 部署后的真实 @Rbot 消息已完成下方 FBD-12 接单验收；建卡写权限、Slack 送达与 Bot 回帖已有线上证据。
+
+## 真实 Slack 接单验收：FBD-12
+
+- 用户于 18:48:43 在实际 Slack 频道发送只读 @Rbot 验收消息，明确不改代码、不发布报告。
+- 18:48:45 生产 Relay 自动创建 [FBD-12](https://multica.ai/fintech-bff-duty/issues/01a18220-6e4c-7369-82d0-925bec6d1d3c)，Project / Agent 与 FinTech Resolver 绑定一致，保存的 `routeId=bug`、`taskType=bug_resolver` 及原始 channel/message/thread 均一致。
+- run `01a18220-6e5e-762d-b9d4-a48bbb238424` 于 18:48:47 启动；无需手工建卡或重新指派。
+- 18:53:47 Rbot 在原 thread 回复 FBD-12 链接和只读核对结果；独立回读确认 author user `U0AM1GJ8GMQ` / bot `B0ALV55DU2X`、thread 归属和正文一致。
+- 按精确来源时间戳（含已关闭任务）查询：FinTech 仅一张对应卡，Review 无对应卡；thread 一条 Bot 回复。没有主动重放 Slack 事件，此结果不等同于线上观察到了全部双投递/故障恢复场景；对应分支由行为回归覆盖。
+- Issue 于 18:54:41 进入 `in_review`；run 于 18:55:08 `completed`，error=null。未改业务代码、创建业务 PR、发布 Site 或修改业务数据。本次证明真实 Slack → 正式 Relay → FinTech Issue → 指定 Resolver → 原 thread Bot 回复；完整 Bug 修复、测试部署和公开报告需具体任务继续验收。
