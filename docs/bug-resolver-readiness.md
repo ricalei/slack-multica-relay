@@ -8,7 +8,7 @@
 - Agent：[MoeGo Bug Resolver](https://multica.ai/fintech-bff-duty/agents/b198894c-31f5-4ecb-ac84-4a4a6f90abb9?view=instructions)，ID `b198894c-31f5-4ecb-ac84-4a4a6f90abb9`；创建回读状态 `idle`，私有，最大并发 2，模型继承本机 Runtime 配置。
 - Project：`MoeGo Bug Resolver 任务看板`，ID `4e5fa137-7111-4355-82db-25268033f6a3`；独立于每日错误分诊看板。
 - Runtime：本机在线 Codex `b80bb51d-56ae-4e89-b984-cec79b53dee3`，codex-cli 0.147.0 / app-server。使用 Runtime 本地已安装 Skills；未复制外置凭据到 Agent 配置或仓库。
-- Prompt：线上全文与提交 `3beda32` 中 `BUG-RESOLVER-PROMPT.md` 逐字一致；已补 Relay-owned eyes 说明，SHA-256 `cf78a01678f46d78ada15f95fecad4f774d385d82c4eb9fb6f2bf154cf39a330`。
+- Prompt 源文件：`BUG-RESOLVER-PROMPT.md`。Relay-owned eyes 版本 `3beda32` 已逐字回读；后续任务链接规则修正及验证见下文，线上发布仍需 CLI 同步后逐字回读。
 - 可在 Multica 左上角选择 **FinTech → 智能体 → MoeGo Bug Resolver** 找到。Agent 创建与配置已确认，Slack 两路分流已部署，实际 Runtime 只读探针已通过；真实 Slack 建卡与回报已由 FBD-12 验证；具体 Bug 的业务验收仍待实际任务验证。
 
 ## 本轮结果
@@ -141,3 +141,10 @@ GitNexus 基于当前工作树生成索引，并核对 HTTP 接收对 Vercel、E
 - 2026-10-28 19:12（上海），源码 `3beda32` 已发布为 `dpl_EEQKUKPEwuRdNtUZnW2nbJ1ATi3v` 并 promote 到既有正式入口；健康 200、未签名 401、候选签名 challenge 回显均通过。回滚目标为上版 `dpl_5tyHxqCfqguFZnEFsWiJ7zewYNgW`，无需改环境变量。线上 Agent 已回读新 Prompt 一致；真实接单 reaction 已由 FBD-14 验证：用户 19:12:47 发送测试消息，19:12:48 自动建卡，回读触发消息存在一个 eyes，唯一添加者为 Rbot `U0AM1GJ8GMQ`。
 
 - 实测任务：[FBD-14](https://multica.ai/fintech-bff-duty/issues/01a18236-734c-7d2d-8e81-d84b8fa83ef1)。来源消息、冻结 Bug payload、项目/Agent 指派与 reaction 身份已逐项一致性核对；仅验证接单图标，不据此声称业务 Bug 验收完成。
+
+
+## 任务链接域名修正（2026-10-28）
+
+FBD-13 的 Slack 进度回复误将 CLI profile `desktop-api.multica.ai` 当作网页域名；该名称 DNS 无法解析，Issue 本身仍存在且正在运行。旧 Prompt 的“已核对的服务地址”没有明确区分 profile、API 与网页入口。现将全部交付位置的任务链接固定为 `https://multica.ai/<workspace slug>/issues/<Issue id>`，回读工作区与 Issue UUID 后构造，identifier 作为显示文字。
+
+在 Rica 已登录的 Chrome 中打开 [FBD-13](https://multica.ai/fintech-bff-duty/issues/01a1822b-68c2-7551-9a10-c83ebbe956bb)，页面自动转为 `/fintech-bff-duty/issues/FBD-13` 并展示正确标题、FinTech 工作区、Resolver 和 Working 状态。此次改动只有 Prompt 与说明，不改 Relay 代码或部署，也不重启正在执行的业务任务；当前运行可能保留旧指令，既有 Slack 消息不会因 Prompt 更新自动改写。
