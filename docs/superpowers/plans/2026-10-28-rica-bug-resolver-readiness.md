@@ -40,3 +40,10 @@
 本人只 @组不得触发Review；他人 @组及本人直接 @自己按原规则接单。可信发布候选精确校验来源。双投递不得重复建卡。冻结重试不能改写原意。观测表情失败不能阻断业务。
 
 执行结论：本阶段的迁移与就绪核对完成。实际 Multica Sites 工具调用、Bug 分路实现与线上端到端验证未执行，明确留在 docs/bug-resolver-readiness.md 下一阶段；没有把它们勾为已交付。
+
+## 已授权的创建交付
+
+- [x] 在 `feat/rica-bug-resolver` 提交、普通 push，并创建个人 fork 的 PR #1。
+- [x] 在 FinTech 工作区创建独立 `MoeGo Bug Resolver` 与任务看板，绑定在线 Codex Runtime，并发 2，逐字回读 Prompt。
+- [x] 在 readiness 文档记录实际对象 ID 与入口；既有 Agent 和 Slack HTTP 入口不变。
+- [ ] 实现并验收 Slack Bug 分路与真实 Runtime 工具调用；本次创建不代表这两项已完成。

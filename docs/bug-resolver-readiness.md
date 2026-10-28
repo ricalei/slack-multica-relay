@@ -1,6 +1,15 @@
 # Rica Bug Resolver：迁移结果与接入缺口
 
-核对日期：2026-10-28。用户已授权本次 commit、push、创建 PR，并指定新 Resolver 归属 FinTech 工作区；线上创建在 PR 建立后执行。当前 Rbot 仍运行旧 HTTP Relay。源参考：[MoeGo Bug Resolver](https://multica.devops.moego.dev/grm/agents/dae9afb3-720b-4a3b-879c-cd63821bd0b2?view=instructions)。
+核对日期：2026-10-28。本次改动已提交、推送并创建 [PR #1](https://github.com/ricalei/slack-multica-relay/pull/1)；PR 建立后已在 FinTech 工作区创建独立 Resolver 和任务看板，并回读确认。当前 Rbot 仍运行旧 HTTP Relay。源参考：[MoeGo Bug Resolver](https://multica.devops.moego.dev/grm/agents/dae9afb3-720b-4a3b-879c-cd63821bd0b2?view=instructions)。
+
+## FinTech 智能体创建回执
+
+- Workspace：`FinTech`（`12ae138f-6c79-4aff-84ac-b0393a4834b2`；slug `fintech-bff-duty`）。
+- Agent：[MoeGo Bug Resolver](https://multica.ai/fintech-bff-duty/agents/b198894c-31f5-4ecb-ac84-4a4a6f90abb9?view=instructions)，ID `b198894c-31f5-4ecb-ac84-4a4a6f90abb9`；创建回读状态 `idle`，私有，最大并发 2，模型继承本机 Runtime 配置。
+- Project：`MoeGo Bug Resolver 任务看板`，ID `4e5fa137-7111-4355-82db-25268033f6a3`；独立于每日错误分诊看板。
+- Runtime：本机在线 Codex `b80bb51d-56ae-4e89-b984-cec79b53dee3`，codex-cli 0.147.0 / app-server。使用 Runtime 本地已安装 Skills；未复制外置凭据到 Agent 配置或仓库。
+- Prompt：线上全文与提交 `b817c5a` 中 `BUG-RESOLVER-PROMPT.md` 逐字一致；SHA-256 `676d431eb0bdc8916760acfc509550f5ea4968b0e53a33e4a28bb67775f0f2de`。
+- 可在 Multica 左上角选择 **FinTech → 智能体 → MoeGo Bug Resolver** 找到。此回执只证明创建与配置保存；没有触发业务任务，Slack 分路及实际 Runtime 工具调用仍待验收。
 
 ## 本轮结果
 
@@ -68,15 +77,15 @@ GrowthBook 已依据本机 Skill 的 `.env.example` 第 7 行补齐公司自托�
 | `app_mention` 类型 | 当前 isSupportedMessage 仍只接受 message，未实现 |
 | 同一 App 按 @Rbot / @Rica / @组 分别选择 Agent | 未实现，不能仅增加 target ID |
 | Rica 个人 Review/发布候选/隔离 reviewer | 本轮已迁入，并通过回归 |
-| 独立 Bug Resolver Agent / Project / Slack 路由绑定 | 仍需创建和绑定，未修改线上既有 Agent |
+| 独立 Bug Resolver Agent / Project / Slack 路由绑定 | FinTech Agent 和 Project 已创建并回读；Slack 路由尚未绑定，既有 Agent 保持不变 |
 
 ## 下一阶段具体实施
 
 1. **事件准入与分路。** 在 mentions/http/config 增加规范化 app_mention 输入和明确 route ID。建议 `@Rbot` 进入 Bug Resolver，`@Rica/@fintech-front-end` 保留 Review；可信发布候选仍走 Review。包含多个目标时必须只选一个确定路由，建议显式 @Rbot 优先，并用测试固定该规则。不要把 Rbot 加入 Review targets 后沿用同一个 Agent。
 2. **隔离队列与任务映射。** route ID 由验签后的服务端配置决定，冻结到队列 payload；消费者拒绝未知/失效路由，按路由选择 Agent/Project/stable scope。Review 老 scope 保持不变，Bug 新 scope 独立。app_mention/message 的同 ts 双投递使用同一去重键；同一 thread 的 Review/Bug 不互相继承任务卡。取消权限按路由真实请求者/owner 明确判断，不能把 Bot target ID 当成人类取消权限名单。
-3. **创建独立 Resolver。** 用户指定 FinTech（ID `12ae138f-6c79-4aff-84ac-b0393a4834b2`，slug `fintech-bff-duty`）；CLI 显式使用 profile `desktop-api.multica.ai` 与此 Workspace，创建任务看板和 Agent，绑定此工作区的本机 Codex Runtime `b80bb51d-56ae-4e89-b984-cec79b53dee3`、此处 Prompt，复用 Runtime 本地已安装 Skills，设置并发 2。保持现有 Review 与 FinTech 日报 Agent 不变。Rbot 回复显式 Bot；read-only search 可用 User，不覆盖共享 SLACK_TOKEN。
+3. **独立 Resolver 已创建。** FinTech 中的 Agent、Project、Runtime 与 Prompt 回执见上节；后续将 Bug 路由绑定到这些已存在的 ID，不重复创建。保持现有 Review 与 FinTech 日报 Agent 不变。Rbot 回复显式 Bot；read-only search 可用 User，不覆盖共享 SLACK_TOKEN。
 4. **能力与业务验收。** 先跑无业务写入的实际 Runtime 探针，再选受控测试 thread/测试 Bug 验证建卡、调查、修复、任务分支普通 push、PR、测试部署、动态验收、公开 Site、原 thread 回报。每个阶段保存实际回执。
-5. **发布与回滚。** 本仓库 AGENTS 要求 Agent 线上修改先有源文件与 PR；用户已明确授权本次 commit/push/PR 与 Agent 创建；先提交本候选并创建 PR，再在 FinTech 创建独立 Resolver。Relay 发布候选部署及既有 HTTP 入口切换仍需完成上述路由实现与验收；保留旧部署和 scope。不要切 Rbot 为 Socket Mode，避免中断现有 HTTP Review。
+5. **发布与回滚。** 本仓库 AGENTS 要求 Agent 线上修改先有源文件与 PR；本次已按授权先提交并创建 PR，再在 FinTech 创建独立 Resolver。Relay 发布候选部署及既有 HTTP 入口切换仍需完成上述路由实现与验收；保留旧部署和 scope。不要切 Rbot 为 Socket Mode，避免中断现有 HTTP Review。
 
 必须覆盖：仅 app_mention、仅 message、同 ts 双投递、同 thread 两条路由、owner仅@组、可信发布重复通知、未知路由、无权取消、排队后配置变化、Runtime 离线恢复、Slack 发送结果不明后回读、Sites 缺失时不假称完成。
 
