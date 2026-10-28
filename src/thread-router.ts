@@ -8,6 +8,7 @@ import {
   createComment,
   findComment,
   getSlackReplyContext,
+  getIssue,
   type ApiConfig,
   type SlackReplyContext,
 } from "./multica-api.js";
@@ -28,6 +29,8 @@ import {
 } from "./task-presentation.js";
 
 interface SlackEventBase {
+  routeId?: "review" | "bug";
+  routeTarget?: string;
   teamId: string;
   channelId: string;
   messageTs: string;
@@ -38,7 +41,7 @@ interface SlackEventBase {
   filesTruncated?: boolean;
 }
 export interface SlackMentionEvent extends SlackEventBase {
-  taskType?: "mention_review";
+  taskType?: "mention_review" | "bug_resolver";
   mention: MentionMatch;
   operation?: "dispatch" | "cancel";
 }
@@ -51,6 +54,7 @@ export type SlackThreadEvent = SlackMentionEvent | SlackReleaseApprovalEvent;
 export interface ThreadRouterConfig extends ApiConfig {
   store: ThreadStore;
   slackReactionToken?: string;
+  ownerSlackUserId?: string;
 }
 export interface ThreadState {
   version: 2;
@@ -135,8 +139,36 @@ export async function routeSlackThreadEvent(
     const marker = `<!-- relay-thread:${scope}:${digest(threadKey(event))} -->`;
     const save = () =>
       config.store.set(key, JSON.stringify(state), STATE_TTL_SECONDS);
-    if (event.operation === "cancel")
+    if (event.operation === "cancel") {
+      // Bug cancellation belongs to the original requester or the configured owner,
+      // never to the mentioned Bot. Check before writing cancellation/ignored state.
+      if (event.routeId === "bug" && event.senderUserId !== config.ownerSlackUserId) {
+        const issue = state.issueId
+          ? await getIssue(config, state.issueId, fetchImpl)
+          : await findIssue(config, marker, fetchImpl);
+        let requester: string | undefined;
+        if (issue) {
+          if (!issue.description?.startsWith(marker + "\n")) throw new Error("invalid_issue_scope");
+          requester = readTaskMessage(issue.description).senderUserId;
+        } else {
+          if (!state.creating) return { action: "ignored" };
+          // The root envelope was frozen before POST. It proves ownership even
+          // while a committed Issue is not yet discoverable, so cancellation
+          // can persist its intent before later follow-ups reach the thread.
+          const frozen = await config.store.get(`relay:${scope}:message:${digest(state.rootMessageKey)}:envelope`);
+          if (!frozen) throw new Error("cancellation_pending");
+          const original = JSON.parse(frozen)?.eventPayload;
+          if (!original || original.routeId !== "bug" ||
+            original.teamId !== event.teamId || original.channelId !== event.channelId ||
+            original.threadTs !== event.threadTs || messageKey(original) !== state.rootMessageKey ||
+            typeof original.senderUserId !== "string") throw new Error("invalid_thread_state");
+          requester = original.senderUserId;
+        }
+        if (requester !== event.senderUserId)
+          return { action: "ignored", issueId: issue?.id };
+      }
       return await cancelThread(event, state, marker, config, save, fetchImpl);
+    }
     if (state.cancellation && state.cancellation.phase !== "done") {
       state.ignoredThrough = maxTimestamp(
         state.ignoredThrough,

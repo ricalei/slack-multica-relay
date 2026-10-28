@@ -1,5 +1,6 @@
 import type { ApiConfig } from "./multica-api.js";
 export interface RelayConfig extends ApiConfig {
+  bugRoute?: ApiConfig & { botUserId: string; slackReactionToken: string };
   signingSecret: string;
   teamId: string;
   ownerSlackUserId: string;
@@ -46,7 +47,25 @@ export function loadRelayConfig(
   const legacy = env.MULTICA_LEGACY_AGENT_ID?.trim() || undefined;
   const scope = env.MULTICA_THREAD_SCOPE_ID?.trim() || undefined;
   if (legacy && (type !== "squad" || scope !== legacy)) throw new Error("invalid_migration_scope");
+  const bugKeys = ["SLACK_BUG_BOT_USER_ID", "MULTICA_BUG_WORKSPACE_ID", "MULTICA_BUG_PROJECT_ID", "MULTICA_BUG_AGENT_ID"];
+  const bugEnabled = bugKeys.some(key => env[key]?.trim());
+  if (bugEnabled && (bugKeys.some(key => !env[key]?.trim()) ||
+    !/^[UW][A-Z0-9]+$/u.test(env.SLACK_BUG_BOT_USER_ID!.trim()) ||
+    targetUserIds.has(env.SLACK_BUG_BOT_USER_ID!.trim())))
+    throw new Error("invalid_bug_route_config");
   return {
+    ...(bugEnabled ? { bugRoute: {
+      botUserId: required(env, "SLACK_BUG_BOT_USER_ID"),
+      multicaApiBaseUrl: https(required(env, "MULTICA_API_BASE_URL")),
+      multicaApiToken: required(env, "MULTICA_API_TOKEN"),
+      multicaWorkspaceId: required(env, "MULTICA_BUG_WORKSPACE_ID"),
+      multicaProjectId: required(env, "MULTICA_BUG_PROJECT_ID"),
+      multicaAssigneeType: "agent" as const,
+      multicaAssigneeId: required(env, "MULTICA_BUG_AGENT_ID"),
+      multicaThreadScopeId: "bug:" + required(env, "MULTICA_BUG_AGENT_ID"),
+      multicaLegacyAgentId: undefined,
+      slackReactionToken: required(env, "SLACK_BOT_TOKEN"),
+    } } : {}),
     signingSecret: required(env, "SLACK_SIGNING_SECRET"),
     teamId: required(env, "SLACK_TEAM_ID"),
     ownerSlackUserId,

@@ -24,7 +24,7 @@ export function findTargetMention(
 
 export function isSupportedMessage(event: SlackMessageEvent): boolean {
   const subtype = typeof event.subtype === 'string' ? event.subtype : undefined;
-  return event.type === 'message'
+  return (event.type === 'message' || event.type === 'app_mention')
     && typeof event.channel === 'string'
     && typeof event.ts === 'string'
     && typeof event.text === 'string'

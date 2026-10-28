@@ -32,7 +32,7 @@ Relay 仍在准备单条事件时，用现有 PAT 读取一次配置并冻结到
 
 ## 3. Slack App
 
-使用专用 App 或明确获准复用的 App 接收需要的 message 事件。私有频道订阅 `message.groups`，并将接收 App 加入指定频道。message 订阅也会送达 App/Bot 消息；Relay 默认拒绝，只有下述发布候选三元组和严格消息格式可以例外进入。Relay 不添加接单 reaction；Agent 核验 Slack 来源、Review/Approve 意图和唯一 PR 后，才使用获准的 owner USER 身份添加 `eyes`。非 Review mention 静默结束，不加 reaction、不回复“没有 PR”；Review 意图明确但 PR 不唯一时可澄清，目标固定前不加 `eyes`。Relay 仅在取消成功后使用同一用户的 `SLACK_USER_TOKEN` 读取和清理自己的 reaction；`SLACK_BOT_TOKEN` 不参与该路径。验收时核对 reaction 和回复消息的 `user` 都是 `U05GLCUAUTU`。
+使用专用 App 或明确获准复用的 App 接收需要的 message 事件。私有频道订阅 `message.groups`，并将接收 App 加入指定频道。message 订阅也会送达 App/Bot 消息；Relay 默认拒绝，只有下述发布候选三元组和严格消息格式可以例外进入。Relay 不添加接单 reaction；Agent 核验 Slack 来源、Review/Approve 意图和唯一 PR 后，才使用获准的 owner USER 身份添加 `eyes`。非 Review mention 静默结束，不加 reaction、不回复“没有 PR”；Review 意图明确但 PR 不唯一时可澄清，目标固定前不加 `eyes`。Relay 仅在取消成功后使用同一用户的 `SLACK_USER_TOKEN` 读取和清理自己的 reaction；`SLACK_BOT_TOKEN` 不参与 Review 路径，独立 Bug 路由用它清理 Bot reaction。验收时核对 reaction 和回复消息的 `user` 都是 `U05GLCUAUTU`。
 
 配置 Request URL 为 `https://<当前部署>/api/slack/events`，对应 Signing Secret 填入部署环境。新增 scopes 后重新安装。只修改已授权用于 Relay 的 App。
 
@@ -95,9 +95,9 @@ EdgeOne Cloud Functions 会把 `Request.body` 暴露为解析值，入口通过 
 
 ## 取消功能配置与验收
 
-可选环境变量 `SLACK_CANCEL_KEYWORDS=cancel,取消`：未配置或空列表使用默认值；例如设置为 `stop,停止` 后只识别这两个词。取消权限直接复用 `SLACK_TARGET_USER_IDS`，用户组本身不授予权限。
+可选环境变量 `SLACK_CANCEL_KEYWORDS=cancel,取消`：未配置或空列表使用默认值；例如设置为 `stop,停止` 后只识别这两个词。Review 取消权限复用 `SLACK_TARGET_USER_IDS`，用户组本身不授予权限。Bug 取消仅允许原请求者或 `RELAY_OWNER_SLACK_USER_ID`，消费者在改动取消状态前回读原 Issue 核验。
 
-继续使用现有 message 订阅。取消清理仅使用 Rica 的 SLACK_USER_TOKEN，不使用 Bot token；两端 User 身份须一致，其他身份的 reaction 保留。无需 reaction 事件订阅。
+继续使用现有 message 订阅。Review 取消清理使用 Rica 的 SLACK_USER_TOKEN；Bug 取消清理使用 Rbot 的 SLACK_BOT_TOKEN。两端身份须分别一致，其他身份的 reaction 保留。无需 reaction 事件订阅。
 
 在专用测试 thread 中启动任务，再由配置的用户回复 `@目标 取消`。检查运行状态变为 cancelled、原触发消息上所选 token 身份的 reaction 被清除、其他身份的 reaction 保留；已完成任务不应被改写或清理。取消结束后发送一条新的任务 mention，检查继续原卡。非授权用户发送取消指令应被忽略。
 
@@ -157,4 +157,10 @@ HTTP 429 或 JSON `rate_limited`/`ratelimited` 表示该次发送被限流，led
 
 ## Rica Bug Resolver 接入状态
 
-本次迁移未部署。app_mention 类型与按 @Rbot 的独立 Agent 路由仍需实现；不要只把 Bot User ID 加入现有 Review targets，否则普通 message 路径可能把 Bug 请求发给 Review Agent。具体实施与验收矩阵见 [准备记录](docs/bug-resolver-readiness.md)。当前 Rbot 继续 HTTP Events，不切 Socket Mode。
+已实现 `message` / `app_mention` 统一入口及 `@Rbot` 独立分路。配置 `.env.example` 的四个 Bug 路由字段与 `SLACK_BOT_TOKEN` 后，显式 @Rbot 优先进入 Bug Resolver；其他 Review mentions 与发布候选仍进入原目标。不要把 Bot User ID 加入 Review targets。当前 Rbot 继续 HTTP Events，不切 Socket Mode。
+
+Bug 消息使用独立 `taskType=bug_resolver`，旧消费者会拒绝而不会重解释为 Review。新队列消息固定 `routeId` 与目标指纹（服务、工作区、项目、执行者与 scope）；消费时目标变化则丢弃，不能自动改投。旧的无 route 字段队列消息仍按 Review 处理。同消息的 `message` / `app_mention` 使用同一个 team/channel/ts 去重键；Bug 与 Review 的队列串行键及任务 scope 独立。禁用 Bug 路由时，清空全部四个 Bug 字段；待消费的旧 Bug 消息会被忽略，不会落入 Review。
+
+当前 FinTech 配置：`SLACK_BUG_BOT_USER_ID=U0AM1GJ8GMQ`、`MULTICA_BUG_WORKSPACE_ID=12ae138f-6c79-4aff-84ac-b0393a4834b2`、`MULTICA_BUG_PROJECT_ID=4e5fa137-7111-4355-82db-25268033f6a3`、`MULTICA_BUG_AGENT_ID=b198894c-31f5-4ecb-ac84-4a4a6f90abb9`。Bot token 从外置配置安全输入，不能写入 Git。旧部署若没有 `SLACK_ALLOWED_CHANNEL_IDS`，迁移时显式设为 `all` 以保留旧行为；不要覆盖或清空既有敏感变量。
+
+Vercel 上传前执行 `deploy --dry --json`，核对 `.vercelignore` 已排除 `.private/`、凭据、GitNexus 索引与本地运行状态。生产候选使用现有项目和 `--prod --skip-domain`，健康与配置检查完成后再 promote，保持原 Slack Request URL 和 QStash consumer URL。回滚使用切换前已回读的生产 deployment ID，不删除 Redis 旧 scope。实际部署与验收状态见 [准备记录](docs/bug-resolver-readiness.md)。

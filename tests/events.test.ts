@@ -200,6 +200,8 @@ describe("durable admission", () => {
     });
     const queued = JSON.parse(String(fetcher.mock.calls[0]![1]!.body));
     expect(queued).toEqual({
+      routeId: "review",
+      routeTarget: expect.stringMatching(/^[a-f0-9]{64}$/u),
       taskType: "release_approval",
       teamId: "T1",
       channelId: "C08HV4GTJ2D",

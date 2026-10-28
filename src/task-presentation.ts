@@ -74,6 +74,7 @@ export function compactEvent(event: SlackThreadEvent): SlackThreadEvent {
     threadTs: event.threadTs,
     senderUserId: event.senderUserId,
     text: event.text,
+    ...(event.routeId ? { routeId: event.routeId, routeTarget: event.routeTarget } : {}),
   };
   const rest: SlackThreadEvent =
     event.taskType === "release_approval"
@@ -182,11 +183,12 @@ export function formatTaskDescription(
 }
 
 export interface RecoveredMessage {
+  senderUserId?: string;
   teamId: string;
   channelId: string;
   threadTs: string;
   messageTs: string;
-  taskType?: "mention_review" | "release_approval";
+  taskType?: "mention_review" | "bug_resolver" | "release_approval";
   releaseApproval?: {
     version: string;
     prUrl: string;
@@ -250,7 +252,7 @@ export function readTaskMessage(description: string): RecoveredMessage {
       throw new Error("invalid_thread_state");
   } else if (
     event.taskType !== undefined &&
-    event.taskType !== "mention_review"
+    event.taskType !== "mention_review" && event.taskType !== "bug_resolver"
   )
     throw new Error("invalid_thread_state");
   return event as unknown as RecoveredMessage;

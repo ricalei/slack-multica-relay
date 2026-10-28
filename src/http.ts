@@ -21,6 +21,7 @@ import {
   messageKey,
   type SlackThreadEvent,
 } from "./thread-router.js";
+import { assignee, threadScopeId } from "./multica-api.js";
 import { UpstashThreadStore } from "./thread-store.js";
 import { compactEvent } from "./task-presentation.js";
 
@@ -47,6 +48,17 @@ async function readBody(request: Request): Promise<string> {
 }
 function record(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
+}
+function routeConfig(id: "review" | "bug", config: RelayConfig): RelayConfig | undefined {
+  if (id === "review") return config;
+  const bug = config.bugRoute;
+  if (!bug) return undefined;
+  return { ...config, ...bug, targetUserIds: new Set([bug.botUserId]), targetSubteamIds: new Set() };
+}
+function routeTarget(config: RelayConfig): string {
+  const target = assignee(config);
+  return digest(JSON.stringify([config.multicaApiBaseUrl, config.multicaWorkspaceId,
+    config.multicaProjectId, target.type, target.id, threadScopeId(config)]));
 }
 function admitted(event: SlackThreadEvent, config: RelayConfig): boolean {
   if (event.taskType === "release_approval") {
@@ -105,6 +117,12 @@ function parsedEvent(value: unknown): SlackThreadEvent {
     ) ||
     typeof value.text !== "string";
   if (invalidBase || !record(value)) throw new Error("invalid_event");
+  if (value.routeId !== undefined || value.routeTarget !== undefined) {
+    if (!["review", "bug"].includes(String(value.routeId)) ||
+      typeof value.routeTarget !== "string" || !/^[a-f0-9]{64}$/u.test(value.routeTarget) ||
+      (value.routeId === "bug" && value.taskType === "release_approval"))
+      throw new Error("invalid_event");
+  }
   if (value.taskType === "release_approval") {
     const approval = value.releaseApproval;
     if (
@@ -126,7 +144,8 @@ function parsedEvent(value: unknown): SlackThreadEvent {
     return value as unknown as SlackThreadEvent;
   }
   if (
-    (value.taskType !== undefined && value.taskType !== "mention_review") ||
+    (value.taskType !== undefined && value.taskType !== "mention_review" && value.taskType !== "bug_resolver") ||
+    ((value.routeId === "bug") !== (value.taskType === "bug_resolver")) ||
     (value.operation !== undefined &&
       value.operation !== "dispatch" &&
       value.operation !== "cancel") ||
@@ -255,7 +274,7 @@ export async function acceptSlack(
   if (releaseApproval) {
     let payload: SlackThreadEvent;
     try {
-      payload = releasePayload(body, event, releaseApproval);
+      payload = { ...releasePayload(body, event, releaseApproval), routeId: "review", routeTarget: routeTarget(config) };
     } catch {
       return json({ error: "invalid_event" }, 400);
     }
@@ -263,7 +282,11 @@ export async function acceptSlack(
       return json({ action: "ignored", reason: "not_allowed" });
     return publish(payload, config, start, fetchImpl);
   }
-  if (!isSupportedMessage(event)) return json({ action: "ignored" });
+  if (!isSupportedMessage(event) || event.user === config.bugRoute?.botUserId)
+    return json({ action: "ignored" });
+  const routeId = config.bugRoute && findTargetMention(event.text as string,
+    new Set([config.bugRoute.botUserId]), new Set()) ? "bug" : "review";
+  config = routeConfig(routeId, config)!;
   const mention = findTargetMention(
     event.text as string,
     config.targetUserIds,
@@ -273,6 +296,8 @@ export async function acceptSlack(
   let payload: SlackThreadEvent;
   try {
     payload = parsedEvent({
+      routeId, routeTarget: routeTarget(config),
+      ...(routeId === "bug" ? { taskType: "bug_resolver" } : {}),
       teamId: body.team_id,
       channelId: event.channel,
       messageTs: event.ts,
@@ -288,7 +313,7 @@ export async function acceptSlack(
   payload = compactEvent(payload);
   if (!admitted(payload, config))
     return json({ action: "ignored", reason: "not_allowed" });
-  if (isOwnerGroupWithoutSelfMention(
+  if (payload.routeId !== "bug" && isOwnerGroupWithoutSelfMention(
     payload.text,
     payload.senderUserId,
     config.ownerSlackUserId,
@@ -304,7 +329,7 @@ export async function acceptSlack(
     ? "cancel"
     : "dispatch";
   if (
-    payload.operation === "cancel" &&
+    payload.operation === "cancel" && payload.routeId !== "bug" &&
     !canCancelTask(payload.senderUserId, config.targetUserIds)
   )
     return json({ action: "ignored", reason: "cancel_not_allowed" });
@@ -331,7 +356,7 @@ async function publish(
           "Upstash-Retries": "3",
           "Upstash-Timeout": "50s",
           "Upstash-Flow-Control-Key": digest(
-            config.consumerUrl + ":" + threadKey(payload),
+            config.consumerUrl + ":" + (payload.routeId === "bug" ? "bug:" : "") + threadKey(payload),
           ),
           "Upstash-Flow-Control-Value": "parallelism=1",
         },
@@ -397,10 +422,16 @@ export async function consumeQueue(
   } catch {
     return consumerFailure("invalid_event");
   }
+  if (event.routeId) {
+    const selected = routeConfig(event.routeId, config);
+    if (!selected || event.routeTarget !== routeTarget(selected))
+      return json({ action: "ignored", reason: "route_changed" });
+    config = selected;
+  }
   if (!admitted(event, config))
     return json({ action: "ignored", reason: "policy_changed" });
   if (
-    event.taskType !== "release_approval" &&
+    event.routeId !== "bug" && event.taskType !== "release_approval" &&
     isOwnerGroupWithoutSelfMention(
       event.text,
       event.senderUserId,
@@ -420,7 +451,7 @@ export async function consumeQueue(
       ? "cancel"
       : "dispatch";
   if (
-    event.operation === "cancel" &&
+    event.operation === "cancel" && event.routeId !== "bug" &&
     !canCancelTask(event.senderUserId, config.targetUserIds)
   )
     return json({ action: "ignored", reason: "cancel_not_allowed" });

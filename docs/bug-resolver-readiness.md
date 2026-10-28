@@ -74,8 +74,8 @@ GrowthBook 已依据本机 Skill 的 `.env.example` 第 7 行补齐公司自托�
 | Agent 或 Team/squad 目标、stable scope | 已有，但一个配置仍只有一个目标 |
 | 冻结事件、附件裁剪、未知写结果回读 | 已有，迁移保留 |
 | 可选可靠 Slack 回复适配器 | 已有，需明确单一发送入口与 actor 后启用 |
-| `app_mention` 类型 | 当前 isSupportedMessage 仍只接受 message，未实现 |
-| 同一 App 按 @Rbot / @Rica / @组 分别选择 Agent | 未实现，不能仅增加 target ID |
+| `app_mention` 类型 | 已实现，与 message 统一进入相同路由与去重路径 |
+| 同一 App 按 @Rbot / @Rica / @组 分别选择 Agent | 已实现显式 @Rbot 优先；Review 与发布候选保留原目标，目标指纹在队列中冻结 |
 | Rica 个人 Review/发布候选/隔离 reviewer | 本轮已迁入，并通过回归 |
 | 独立 Bug Resolver Agent / Project / Slack 路由绑定 | FinTech Agent 和 Project 已创建并回读；Slack 路由尚未绑定，既有 Agent 保持不变 |
 
@@ -100,3 +100,15 @@ Node 24.18.0 / pnpm 10.34.5，`pnpm install --frozen-lockfile`；迁移前先观
 - Skills：Slack 121、Datadog 21、acceptance Python 233 + Node 11、升级差异 GitHub 8 + Redshift 41 测试通过；外部配置哈希保持一致。
 
 代码测试主要使用 HTTP fake，Cloudflare 为本地 workerd；没有向真实 Slack/GitHub/Multica 发起业务写入。完整迁移记录见 `.private/bug-resolver-audit/relay.md`；本轮不声称 Slack→修复→验收→公开报告已上线。
+
+## Slack 路由实现增量（2026-10-28）
+
+当前新增 20 项行为测试先失败后通过；完整回归为 290 项 TypeScript、225 项 Python，`pnpm lint` 与 `git diff --check` 通过。覆盖同 ts 双事件只有一张卡、同 thread 两路独立、混合 mention 只选 Bot、伪造元数据无效、配置改变不改投、非请求者取消不污染后续事件、owner/请求者取消使用 Bot 清理身份。Review 旧队列与原 scope 保持兼容。
+
+GitNexus 基于当前工作树生成索引，并核对 HTTP 接收对 Vercel、EdgeOne、Cloudflare 适配器的调用影响；图有流程裁剪，未用缺失边代替代码核对。Vercel 上传 dry-run 发现本地审计目录会被包含，已增加 `.vercelignore` 排除；该验证必须在真正上传前重跑。部署状态、实际 Runtime 探针与真实 Slack 入站验证将在执行后补记，不由单元测试推断上线成功。
+
+独立复核发现并修复了建卡响应丢失时的 requester 取消恢复问题：使用 POST 前冻结的 root envelope 核验发起人，再进入已有取消状态机；取消待恢复时的 follow-up 不覆盖取消意图。Bug payload 显式使用 `taskType=bug_resolver`，旧消费者会拒绝该类型，回滚不会把混合 mention 误投 Review。修复后独立复核无新的明确阻塞。
+
+实际 Runtime 能力探针 [FBD-11](https://multica.ai/fintech-bff-duty/issues/01a18209-875c-7e59-9a0c-f8890d36b08f) 已完成：run `01a1820a-00f2-795d-bd14-e328afe9f18b` 于 2026-10-28 18:32（上海）completed，error=null，Issue in_review。13/13 Skills 读取成功，原始 PATH 执行 agent-browser 0.40.0 / Maestro 2.12.0 均 exit 0；真实单次 `sites.list_sites(limit=1)` 返回 `{items:[],cursor:null}`。未发送 Slack、发布 Site 或修改业务数据；此探针证明实际 Resolver 工具可调用，不代表业务验收或报告发布已验证。
+
+最终验证有一次既有 `test_sigterm_cancels_helper_and_its_detached_worker` 未在 5 秒内观察到合成 worker 启动；该项单独复测通过，完整 Python 225 项随后通过（0.909s）。未修改 helper 或该测试；保留首轮失败日志，不将其隐去。最终 TypeScript 290 项通过，类型检查通过。
