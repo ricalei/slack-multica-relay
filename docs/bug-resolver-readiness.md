@@ -132,3 +132,10 @@ GitNexus 基于当前工作树生成索引，并核对 HTTP 接收对 Vercel、E
 - 18:53:47 Rbot 在原 thread 回复 FBD-12 链接和只读核对结果；独立回读确认 author user `U0AM1GJ8GMQ` / bot `B0ALV55DU2X`、thread 归属和正文一致。
 - 按精确来源时间戳（含已关闭任务）查询：FinTech 仅一张对应卡，Review 无对应卡；thread 一条 Bot 回复。没有主动重放 Slack 事件，此结果不等同于线上观察到了全部双投递/故障恢复场景；对应分支由行为回归覆盖。
 - Issue 于 18:54:41 进入 `in_review`；run 于 18:55:08 `completed`，error=null。未改业务代码、创建业务 PR、发布 Site 或修改业务数据。本次证明真实 Slack → 正式 Relay → FinTech Issue → 指定 Resolver → 原 thread Bot 回复；完整 Bug 修复、测试部署和公开报告需具体任务继续验收。
+
+## Bug 接单 eyes 增量
+
+- Rica 要求收到 @Rbot 后有图标反馈。Bug consumer 在任务/后续消息持久化后，使用经 auth.test 核验的 Rbot 身份，将 eyes 加到触发消息；Review 维持 Agent-owned reaction。
+- 同一消息重投不重加，取消与忽略事件不加；发送在已有 thread lock 内完成，避免本地取消清理与新增反馈交错。Slack 响应未知时不自动重发；best effort 反馈缺失不影响已交付任务。
+- 新增 13 项行为用例：首批原代码 11 项失败、1 项通过；独立审查另复现了 receipt 耗尽总时限后锁清理失败导致 503 的问题，修复后该项先红后绿。锁释放单独保留 2 秒预算与 owner 校验；业务/receipt 仍受原 45 秒总时限约束。最终完整 TypeScript 303 项 / Python 225 项及类型检查通过。
+- 该增量的生产部署和真实接单 reaction 验收待发布后补记。

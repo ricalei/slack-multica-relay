@@ -469,10 +469,13 @@ export async function consumeQueue(
       event,
       {
         ...config,
+        slackBotUserId: event.routeId === "bug" ? config.bugRoute?.botUserId : undefined,
         store: new UpstashThreadStore(
           config.kvRestApiUrl,
           config.kvRestApiToken,
           boundedFetch,
+          // Release remains bounded to 2s even after the dispatch deadline expires.
+          fetchImpl,
         ),
       },
       boundedFetch,

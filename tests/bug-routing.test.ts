@@ -24,11 +24,13 @@ function request(event: unknown) {
     "x-slack-signature": "v0=" + createHmac("sha256", "test").update(`v0:${ts}:${body}`).digest("hex"),
   } });
 }
-function fixture() {
+function fixture(options: { beforeAuth?: () => void; reactionFailure?: string; identity?: { team_id: string; user_id: string; bot_id?: string } } = {}) {
   const queued: { body: any; headers: Headers }[] = [];
   const kv = new Map<string, string>();
   const issues: any[] = [], comments: any[] = [], runs: any[] = [];
   const slackActors: string[] = [];
+  const reactionAdds: { body: any; issueCount: number; commentCount: number }[] = [];
+  const reactions = new Set<string>();
   let loseCreate = false, hideSearch = false;
   const fetcher: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
@@ -50,8 +52,18 @@ function fixture() {
     }
     if (url.host === "slack.com") {
       slackActors.push(headers.get("authorization")!);
-      if (url.pathname.endsWith("auth.test")) return Response.json({ ok: true, user_id: "UBUG" });
-      if (url.pathname.endsWith("reactions.get")) return Response.json({ ok: true, message: { reactions: [] } });
+      if (url.pathname.endsWith("auth.test")) { options.beforeAuth?.(); return Response.json({ ok: true, ...(options.identity ?? { team_id: "T1", user_id: "UBUG", bot_id: "BBUG" }) }); }
+      const target = `${body.channel ?? url.searchParams.get("channel")}:${body.timestamp ?? url.searchParams.get("timestamp")}`;
+      if (url.pathname.endsWith("reactions.get")) return Response.json({ ok: true, message: { reactions: reactions.has(target) ? [{ name: "eyes", users: ["UBUG"] }] : [] } });
+      if (url.pathname.endsWith("reactions.remove")) { reactions.delete(target); return Response.json({ ok: true }); }
+      if (url.pathname.endsWith("reactions.add")) {
+        reactionAdds.push({ body, issueCount: issues.length, commentCount: comments.length });
+        if (options.reactionFailure === "transport") throw new Error("network failure");
+        if (options.reactionFailure === "http") return Response.json({ ok: false }, { status: 503 });
+        if (options.reactionFailure) return Response.json({ ok: false, error: options.reactionFailure });
+        if (reactions.has(target)) return Response.json({ ok: false, error: "already_reacted" });
+        reactions.add(target); return Response.json({ ok: true });
+      }
     }
     if (url.pathname.startsWith("/api/agents/")) return Response.json({ id: url.pathname.split("/").at(-1), workspace_id: ws });
     if (url.pathname.endsWith("/search")) return Response.json({ issues: hideSearch ? [] : issues.filter(x => x.workspace_id === ws && x.description.includes(url.searchParams.get("q"))) });
@@ -75,13 +87,82 @@ function fixture() {
   };
   const admit = async (event: unknown, config = env) => acceptSlack(request(event), config, fetcher);
   const consume = async (body: unknown, config = env) => consumeQueue(new Request(env.RELAY_CONSUMER_URL, { method: "POST", body: JSON.stringify(body) }), config, fetcher);
-  return { queued, kv, issues, comments, runs, slackActors, admit, consume,
+  return { queued, kv, issues, comments, runs, slackActors, reactionAdds, reactions, admit, consume,
     loseCreateResponse() { loseCreate = true; hideSearch = true; },
     restoreSearch() { loseCreate = false; hideSearch = false; },
   };
 }
 
 describe("Bug and Review routes", () => {
+  it("adds Bot eyes to the triggering reply only after its issue is persisted", async () => {
+    const f = fixture();
+    await f.admit({ ...root, ts: "101.000001", thread_ts: root.ts });
+    expect(f.slackActors).toEqual([]);
+    expect(await (await f.consume(f.queued[0]!.body)).json()).toMatchObject({ action: "created" });
+    expect(f.reactionAdds).toEqual([{ body: { channel: "C1", timestamp: "101.000001", name: "eyes" }, issueCount: 1, commentCount: 0 }]);
+    expect(f.reactions.has("C1:101.000001")).toBe(true);
+    expect(new Set(f.slackActors)).toEqual(new Set(["Bearer bug-token"]));
+  });
+  it("acknowledges each persisted follow-up once and skips paired event duplicates", async () => {
+    const f = fixture(); await f.admit(root); await f.admit({ ...root, type: "app_mention" });
+    await f.consume(f.queued[0]!.body); await f.consume(f.queued[1]!.body);
+    await f.admit({ ...root, ts: "102.000001", thread_ts: root.ts });
+    await f.consume(f.queued[2]!.body); await f.consume(f.queued[2]!.body);
+    expect(f.reactionAdds.map(x => [x.body.timestamp, x.commentCount])).toEqual([[root.ts, 0], ["102.000001", 1]]);
+    expect(f.issues).toHaveLength(1); expect(f.comments).toHaveLength(1);
+  });
+  it("releases the thread lock and accepts completed delivery when the deadline expires during eyes", async () => {
+    const deadline = new AbortController();
+    const timeout = AbortSignal.timeout.bind(AbortSignal);
+    vi.spyOn(AbortSignal, "timeout").mockImplementation(ms => ms === 45000 ? deadline.signal : timeout(ms));
+    const f = fixture({ beforeAuth: () => deadline.abort(new DOMException("Receipt deadline", "TimeoutError")) });
+    await f.admit(root);
+    const result = await f.consume(f.queued[0]!.body);
+    expect(result.status).toBe(200); expect(await result.json()).toMatchObject({ action: "created" });
+    expect(f.issues).toHaveLength(1);
+    expect([...f.kv.entries()].some(([key, value]) => key.includes(":message:") && !key.endsWith(":envelope") && JSON.parse(value).phase === "done")).toBe(true);
+    expect([...f.kv.keys()].filter(key => key.endsWith(":lock"))).toEqual([]);
+  });
+  it("leaves Review reactions to the Review agent", async () => {
+    const f = fixture(); await f.admit({ ...root, text: "<@U1> review" }); await f.consume(f.queued[0]!.body);
+    expect(f.slackActors).toEqual([]);
+  });
+  it.each(["missing_scope", "transport", "http"])("keeps Bug dispatch successful when eyes fails with %s", async reactionFailure => {
+    const f = fixture({ reactionFailure }); await f.admit(root);
+    const first = await f.consume(f.queued[0]!.body);
+    expect(first.status).toBe(200); expect(await first.json()).toMatchObject({ action: "created" });
+    expect(f.reactionAdds).toHaveLength(1);
+    expect(await (await f.consume(f.queued[0]!.body)).json()).toMatchObject({ action: "duplicate" });
+    expect(f.reactionAdds).toHaveLength(1); expect(f.issues).toHaveLength(1);
+  });
+  it.each([
+    { team_id: "OTHER", user_id: "UBUG", bot_id: "BBUG" },
+    { team_id: "T1", user_id: "OTHER", bot_id: "BOTHER" },
+    { team_id: "T1", user_id: "UBUG" },
+  ])("does not react using an unexpected Slack identity %j", async identity => {
+    const f = fixture({ identity }); await f.admit(root);
+    expect(await (await f.consume(f.queued[0]!.body)).json()).toMatchObject({ action: "created" });
+    expect(f.slackActors.length).toBeGreaterThan(0); expect(f.reactionAdds).toEqual([]);
+  });
+  it("accepts existing Bot eyes and does not turn that into a queue retry", async () => {
+    const f = fixture({ reactionFailure: "already_reacted" }); await f.admit(root);
+    expect(await (await f.consume(f.queued[0]!.body)).json()).toMatchObject({ action: "created" });
+    expect(f.reactionAdds).toHaveLength(1);
+  });
+  it("does not acknowledge an ambiguous create until it is recovered", async () => {
+    const f = fixture(); f.loseCreateResponse(); await f.admit(root);
+    expect((await f.consume(f.queued[0]!.body)).status).toBe(503); expect(f.reactionAdds).toEqual([]);
+    f.restoreSearch(); expect(await (await f.consume(f.queued[0]!.body)).json()).toMatchObject({ action: "created" });
+    expect(f.reactionAdds).toHaveLength(1);
+  });
+  it("cancellation removes Bot eyes and a delayed duplicate cannot add it back", async () => {
+    const f = fixture(); await f.admit(root); await f.consume(f.queued[0]!.body);
+    expect(f.reactions.has(`C1:${root.ts}`)).toBe(true);
+    await f.admit({ ...root, user: "U1", ts: "102.000001", thread_ts: root.ts, text: "<@UBUG> cancel" });
+    expect(await (await f.consume(f.queued[1]!.body)).json()).toMatchObject({ action: "cancelled" });
+    expect(await (await f.consume(f.queued[0]!.body)).json()).toMatchObject({ action: "ignored" });
+    expect(f.reactions.size).toBe(0); expect(f.reactionAdds).toHaveLength(1);
+  });
   it.each(["message", "app_mention"])("accepts %s as a Bug request and creates a FinTech Resolver issue", async type => {
     const f = fixture();
     expect(await (await f.admit({ ...root, type })).json()).toMatchObject({ action: "accepted" });

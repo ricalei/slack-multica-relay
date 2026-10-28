@@ -32,7 +32,9 @@ Relay 仍在准备单条事件时，用现有 PAT 读取一次配置并冻结到
 
 ## 3. Slack App
 
-使用专用 App 或明确获准复用的 App 接收需要的 message 事件。私有频道订阅 `message.groups`，并将接收 App 加入指定频道。message 订阅也会送达 App/Bot 消息；Relay 默认拒绝，只有下述发布候选三元组和严格消息格式可以例外进入。Relay 不添加接单 reaction；Agent 核验 Slack 来源、Review/Approve 意图和唯一 PR 后，才使用获准的 owner USER 身份添加 `eyes`。非 Review mention 静默结束，不加 reaction、不回复“没有 PR”；Review 意图明确但 PR 不唯一时可澄清，目标固定前不加 `eyes`。Relay 仅在取消成功后使用同一用户的 `SLACK_USER_TOKEN` 读取和清理自己的 reaction；`SLACK_BOT_TOKEN` 不参与 Review 路径，独立 Bug 路由用它清理 Bot reaction。验收时核对 reaction 和回复消息的 `user` 都是 `U05GLCUAUTU`。
+使用专用 App 或明确获准复用的 App 接收需要的 message 事件。私有频道订阅 `message.groups`，并将接收 App 加入指定频道。message 订阅也会送达 App/Bot 消息；Relay 默认拒绝，只有下述发布候选三元组和严格消息格式可以例外进入。Review 路径的 Relay 不添加接单 reaction；Review Agent 核验 Slack 来源、Review/Approve 意图和唯一 PR 后，才使用获准的 owner USER 身份添加 `eyes`。非 Review mention 静默结束，不加 reaction、不回复“没有 PR”；Review 意图明确但 PR 不唯一时可澄清，目标固定前不加 `eyes`。Relay 仅在取消成功后使用同一用户的 `SLACK_USER_TOKEN` 读取和清理自己的 reaction；`SLACK_BOT_TOKEN` 不参与 Review 路径，独立 Bug 路由用它添加接单 eyes 并清理 Bot reaction。Review 验收时核对 reaction 和回复消息的 `user` 都是 `U05GLCUAUTU`。
+
+Bug 路径在 Issue / follow-up 持久化后，由 consumer 在触发 @ 消息（非固定 thread 根消息）上添加 `eyes`；使用 `SLACK_BOT_TOKEN`，先用 `auth.test` 核对工作区与 `SLACK_BUG_BOT_USER_ID`。Bot 需要 `reactions:write`。重复事件、取消或忽略事件不加；接单反馈在既有 thread lock 内完成，随后取消仍能清理该反馈。reaction 是有界 best effort，失败只记录 `relay_bug_receipt / eyes_failed`，不重试已完成的任务交付、不阻断 Agent；消息落库后进程中断可能缺少该图标，Agent 仍继续处理。官方接口：[reactions.add](https://docs.slack.dev/reference/methods/reactions.add/)。
 
 配置 Request URL 为 `https://<当前部署>/api/slack/events`，对应 Signing Secret 填入部署环境。新增 scopes 后重新安装。只修改已授权用于 Relay 的 App。
 

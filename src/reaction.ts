@@ -29,3 +29,24 @@ export async function clearOwnSlackReactions(
       await call('reactions.remove', { channel: channelId, timestamp: messageTs, name: reaction.name });
   }
 }
+
+export async function addSlackEyes(
+  token: string, teamId: string, botUserId: string, channelId: string, messageTs: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  const call = async (method: string, body: Record<string, string>) => {
+    const response = await fetchImpl(`https://slack.com/api/${method}`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json; charset=utf-8' },
+      body: JSON.stringify(body), signal: AbortSignal.timeout(2000),
+    });
+    if (!response.ok) throw new Error('reaction_add_failed');
+    return await response.json() as Record<string, unknown>;
+  };
+  const identity = await call('auth.test', {});
+  if (identity.ok !== true || identity.team_id !== teamId || identity.user_id !== botUserId ||
+    typeof identity.bot_id !== 'string' || !identity.bot_id)
+    throw new Error('reaction_identity_mismatch');
+  const result = await call('reactions.add', { channel: channelId, timestamp: messageTs, name: 'eyes' });
+  if (result.ok !== true && result.error !== 'already_reacted') throw new Error('reaction_add_failed');
+}

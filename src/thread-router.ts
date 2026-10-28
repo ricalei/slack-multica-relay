@@ -20,6 +20,7 @@ import {
   maxTimestamp,
   type CancellationState,
 } from "./cancellation.js";
+import { addSlackEyes } from "./reaction.js";
 import { type ThreadStore } from "./thread-store.js";
 import {
   formatTaskTitle,
@@ -54,6 +55,7 @@ export type SlackThreadEvent = SlackMentionEvent | SlackReleaseApprovalEvent;
 export interface ThreadRouterConfig extends ApiConfig {
   store: ThreadStore;
   slackReactionToken?: string;
+  slackBotUserId?: string;
   ownerSlackUserId?: string;
 }
 export interface ThreadState {
@@ -191,9 +193,21 @@ export async function routeSlackThreadEvent(
     if (!state.reactionMessages.includes(event.messageTs))
       state.reactionMessages.push(event.messageTs);
     await save();
-    const finish = (
+    const finish = async (
       action: "created" | "comment_persisted" | "duplicate",
-    ): ThreadRouteResult => ({ action, issueId: state.issueId });
+    ): Promise<ThreadRouteResult> => {
+      if (event.routeId === "bug" && action !== "duplicate") {
+        try {
+          if (!config.slackReactionToken || !config.slackBotUserId) throw new Error("missing_bot_identity");
+          await addSlackEyes(config.slackReactionToken, event.teamId, config.slackBotUserId,
+            event.channelId, event.messageTs, fetchImpl);
+        } catch {
+          // Receipt is best effort. Never retry completed task delivery for a reaction failure.
+          console.warn("relay_bug_receipt", { eventId: digest(messageKey(event)), reason: "eyes_failed" });
+        }
+      }
+      return { action, issueId: state.issueId };
+    };
     const prepare = async (descriptionMarker: string, followup: boolean): Promise<string> => {
       const preparedKey = msgKey + ":envelope";
       const previous = await config.store.get(preparedKey);
@@ -259,14 +273,14 @@ export async function routeSlackThreadEvent(
     }
     const previous = await config.store.get(msgKey);
     if (previous && (JSON.parse(previous) as MessageState).phase === "done")
-      return finish("duplicate");
+      return await finish("duplicate");
     if (messageKey(event) === state.rootMessageKey) {
       await config.store.set(
         msgKey,
         JSON.stringify({ phase: "done" }),
         STATE_TTL_SECONDS,
       );
-      return finish("created");
+      return await finish("created");
     }
     const messageMarker = `<!-- relay-message:${digest(messageKey(event))} -->`;
     const existingComment = await findComment(
@@ -315,7 +329,7 @@ export async function routeSlackThreadEvent(
       JSON.stringify({ phase: "done" }),
       STATE_TTL_SECONDS,
     );
-    return finish("comment_persisted");
+    return await finish("comment_persisted");
   } finally {
     await config.store.releaseIfOwner(lockKey, owner);
   }
