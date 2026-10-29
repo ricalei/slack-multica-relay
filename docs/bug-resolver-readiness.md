@@ -164,3 +164,14 @@ FBD-19 修改共享 GrowthBook 注册表后，仓库原生 `pre-commit` 的 `vit
 Rica 要求本 Resolver 的测试使用 Ego，并选择 Codex 6-luna。浏览器覆盖 MIS 准备、业务验收和报告预览，覆盖其他 Skill 的 Chrome／agent-browser 默认路径；能力不足时报告具体缺口，不自行切回 Chrome。模型由 Agent 的 `model` 字段设置为 `gpt-6-luna`，不修改全局 Codex 配置或其他 Agent。当前 Resolver 为单 Agent，模型设置作用于整次运行。
 
 切换前已中断 FBD-19 旧运行 `01a18625-dbcf-715b-aa9c-0a4b5f170c36`，回读为 cancelled；保留原 Issue、分支与现场。Ego CLI 指引 v2.1.0 可读取；本机当日 Codex 模型目录列有 `gpt-6-luna`。线上配置及恢复后的实际启动模型仍需各自回读确认，不把模型保存当作业务验收完成。
+
+
+## 浏览器现场绑定与恢复规则（2026-10-29）
+
+对照上游 `winchesHe/slack-multica-relay` 的 `cd7c06c2f178be381a1e3e99ef803753cf79a14c`：`BUG-RESOLVER-PROMPT.md` 已要求实际代码来源、逐 Case 观察、数据缺口调查、连续三轮无新增证据时停止原路径，以及保留恢复进度；但没有明确规定主站与分支标签不能互相替代、登录／切账号后重新核验绑定、先查资格再找样本及逐 Case checkpoint。`AGENT-PROMPT.md` 与 `multica-final-reply` 属于另一 Router 的接单／回复流程，不能承担 Resolver 浏览器验收控制。
+
+FBD-19 曾出现分支 p2 停在 `/sign_in`、已登录的 p3 实际消费主站版本，运行却继续在 p3 查询资格的情况。补充 Resolver 的通用前置规则：预期与实际环境、账号／商家、分支版本及业务页必须匹配；登录接续或相关现场变化后重新确认。资格查询和登录恢复单独记录，不能计入业务通过；先核实资格再查样本。每 Case 与现场切换保存可接续 checkpoint，复用未变化的文档与版本信息；连续两次相同失败无新观察便停止重复，继续调查替代路径。
+
+本次改动只涉及 Resolver Prompt 与本说明，不改 Relay 投递、共享 Skills、模型或业务工作树。Prompt 同步后仅能确认新配置已保存；已启动 run 是否重载没有保证，不为更新 Prompt 并发启动业务任务。实际行为仍需后续运行的页面、版本与 Case 证据验证。
+
+Prompt 属于行为约束，不是程序硬门禁。Relay 没有业务浏览器状态，不能仅凭 run=running、评论已保存或 👀 判断业务推进。需要进一步强制保障时，应在验收执行层对页面／账号／版本／资格及 Case 证据作结构化校验，缺项拒绝产生通过结论；该运行时校验本轮未实现。当前外部跟进仍按实际新增观察识别停滞，并区分评论保存与运行实际收到。
