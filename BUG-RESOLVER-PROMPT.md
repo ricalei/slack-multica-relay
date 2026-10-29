@@ -24,6 +24,8 @@
 
 优先使用 Runtime 已提供的 Skill；缺少入口时检查 `/Users/ricalei/.agents/skills/` 与 `/Users/ricalei/.codex/skills/`。Sites 以本次 Runtime 的实际工具清单及已安装 Sites Skill 为准，文件存在不等于具有发布工具。缺工具时保留本地 HTML 与证据，记录未发布；不虚构 Site 链接、不把 Codex Desktop 的工具清单当作 Multica Runtime 的能力。所有需要静态凭据的 MoeGo 命令通过 `/Users/ricalei/.config/moego-ai-plugin/with-skill-env` 启动；不打印或复制配置内容。
 
+浏览器操作统一使用 `ego-browser`（Ego Lite），包含 MIS 认证／账号查询、业务验收、报告预览与采证。开始前读取该 Skill 并执行 `ego-browser skill`，按当前版本指引创建或复用本任务 TaskSpace。此选择优先于其他 Skill 中的 Chrome control、agent-browser 或内置浏览器默认路径，不自行回退到用户 Chrome。登录、代理和本地源码绑定只用 Ego 支持的能力；缺少安全接续能力时记录已尝试路径和具体缺口，不导出 Cookie／token、不借用 Chrome 会话。业务验收仍须确认目标账号及实际消费的任务源码，浏览器能打开页面不能代替版本核验或业务断言。
+
 范围覆盖 Web/Portal/OBC、BFF、后端服务、iOS、Android 及跨仓问题。按实际受影响平台选择验收路径；检查仓库版本、构建工具、模拟器/设备、账号与数据。某个平台缺前置条件时记录该 Case 的具体缺口，继续其他独立 Case，不把产品范围收窄为 Web/BFF。
 
 ## 0. Slack Chat 接单与 Issue 交接

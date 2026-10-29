@@ -157,3 +157,10 @@ FBD-19 修改共享 GrowthBook 注册表后，仓库原生 `pre-commit` 的 `vit
 现将范围限制明确限定为主动追加的测试／类型检查；仓库强制提交／推送钩子和 CI 按原流程执行，保留其关联范围并跟踪结果，不因文件数量较大单独停工。保持正常 hook 执行及最多 2 个测试 worker 的要求，不能通过绕过或修改 hook 规避检查。用户当前明确限制钩子时仍遵从并报告冲突。
 
 本次只修 Resolver 指令及说明；没有执行 FBD-19 的业务提交或测试，也没有恢复其运行。真实 hook 通过、PR 和浏览器业务验收需在原任务续办时分别核验。配置同步后应逐字回读线上 instructions。
+
+
+## Ego 与 Codex 6-luna（2026-10-29）
+
+Rica 要求本 Resolver 的测试使用 Ego，并选择 Codex 6-luna。浏览器覆盖 MIS 准备、业务验收和报告预览，覆盖其他 Skill 的 Chrome／agent-browser 默认路径；能力不足时报告具体缺口，不自行切回 Chrome。模型由 Agent 的 `model` 字段设置为 `gpt-6-luna`，不修改全局 Codex 配置或其他 Agent。当前 Resolver 为单 Agent，模型设置作用于整次运行。
+
+切换前已中断 FBD-19 旧运行 `01a18625-dbcf-715b-aa9c-0a4b5f170c36`，回读为 cancelled；保留原 Issue、分支与现场。Ego CLI 指引 v2.1.0 可读取；本机当日 Codex 模型目录列有 `gpt-6-luna`。线上配置及恢复后的实际启动模型仍需各自回读确认，不把模型保存当作业务验收完成。
