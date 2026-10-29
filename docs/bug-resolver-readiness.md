@@ -148,3 +148,12 @@ GitNexus 基于当前工作树生成索引，并核对 HTTP 接收对 Vercel、E
 FBD-13 的 Slack 进度回复误将 CLI profile `desktop-api.multica.ai` 当作网页域名；该名称 DNS 无法解析，Issue 本身仍存在且正在运行。旧 Prompt 的“已核对的服务地址”没有明确区分 profile、API 与网页入口。现将全部交付位置的任务链接固定为 `https://multica.ai/<workspace slug>/issues/<Issue id>`，回读工作区与 Issue UUID 后构造，identifier 作为显示文字。
 
 在 Rica 已登录的 Chrome 中打开 [FBD-13](https://multica.ai/fintech-bff-duty/issues/01a1822b-68c2-7551-9a10-c83ebbe956bb)，页面自动转为 `/fintech-bff-duty/issues/FBD-13` 并展示正确标题、FinTech 工作区、Resolver 和 Working 状态。此次改动只有 Prompt 与说明，不改 Relay 代码或部署，也不重启正在执行的业务任务；当前运行可能保留旧指令，既有 Slack 消息不会因 Prompt 更新自动改写。
+
+
+## 提交钩子与主动测试范围（2026-10-29）
+
+FBD-19 修改共享 GrowthBook 注册表后，仓库原生 `pre-commit` 的 `vitest related` 只读枚举展开到 660 个文件。旧 Prompt 把所有测试都限定为显式文件增量，与不得跳过仓库 hook 的要求冲突，Agent 因而未尝试提交。
+
+现将范围限制明确限定为主动追加的测试／类型检查；仓库强制提交／推送钩子和 CI 按原流程执行，保留其关联范围并跟踪结果，不因文件数量较大单独停工。保持正常 hook 执行及最多 2 个测试 worker 的要求，不能通过绕过或修改 hook 规避检查。用户当前明确限制钩子时仍遵从并报告冲突。
+
+本次只修 Resolver 指令及说明；没有执行 FBD-19 的业务提交或测试，也没有恢复其运行。真实 hook 通过、PR 和浏览器业务验收需在原任务续办时分别核验。配置同步后应逐字回读线上 instructions。
