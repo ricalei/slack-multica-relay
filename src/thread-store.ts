@@ -19,6 +19,7 @@ export class UpstashThreadStore implements ThreadStore {
     private readonly url: string,
     private readonly token: string,
     private readonly fetchImpl: typeof fetch = fetch,
+    private readonly cleanupFetch: typeof fetch = fetchImpl,
   ) {}
 
   async get(key: string): Promise<string | null> {
@@ -43,11 +44,11 @@ export class UpstashThreadStore implements ThreadStore {
       '1',
       key,
       owner,
-    ]);
+    ], this.cleanupFetch);
   }
 
-  private async command(command: string[]): Promise<unknown> {
-    const response = await this.fetchImpl(this.url, {
+  private async command(command: string[], fetchImpl = this.fetchImpl): Promise<unknown> {
+    const response = await fetchImpl(this.url, {
       method: 'POST',
       headers: {
         authorization: `Bearer ${this.token}`,

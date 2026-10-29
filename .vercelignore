@@ -1,0 +1,11 @@
+.git/
+.gitnexus/
+node_modules/
+.private/
+.slack-reply-state/
+.wrangler/
+.dev.vars
+.dev.vars.*
+.env
+.env.*
+__pycache__/

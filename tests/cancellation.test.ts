@@ -25,6 +25,7 @@ const cancel = {
   text: "<@U1> 取消",
   operation: "cancel" as const,
 };
+const ownerSlackUserId = "U05GLCUAUTU";
 function fixture() {
   const store = new MemoryThreadStore();
   const config: ThreadRouterConfig = {
@@ -34,7 +35,6 @@ function fixture() {
     multicaProjectId: "project",
     multicaAgentId: "agent",
     slackReactionToken: "test",
-    slackReactionName: "eyes",
     store,
   };
   const issues: Record<string, unknown>[] = [];
@@ -96,14 +96,17 @@ function fixture() {
     if (url.endsWith("/reactions.add")) {
       const rows = reactions.get(body.timestamp) ?? [];
       if (
-        !rows.some((row) => row.name === body.name && row.users.includes("U1"))
+        !rows.some(
+          (row) =>
+            row.name === body.name && row.users.includes(ownerSlackUserId),
+        )
       )
-        rows.push({ name: body.name, users: ["U1"] });
+        rows.push({ name: body.name, users: [ownerSlackUserId] });
       reactions.set(body.timestamp, rows);
       return Response.json({ ok: true });
     }
     if (url.endsWith("/auth.test"))
-      return Response.json({ ok: true, user_id: "U1" });
+      return Response.json({ ok: true, user_id: ownerSlackUserId });
     if (new URL(url).pathname.endsWith("/reactions.get"))
       return Response.json({
         ok: true,
@@ -114,12 +117,30 @@ function fixture() {
         return Response.json({ ok: false, error: "missing_scope" });
       for (const row of reactions.get(body.timestamp) ?? [])
         if (row.name === body.name)
-          row.users = row.users.filter((user) => user !== "U1");
+          row.users = row.users.filter((user) => user !== ownerSlackUserId);
       return Response.json({ ok: true });
     }
     throw new Error(`unexpected endpoint ${url}`);
   };
-  const route = (event = root) => routeSlackThreadEvent(event, config, fetcher);
+  const seedAgentReaction = (messageTs: string) => {
+    const rows = reactions.get(messageTs) ?? [];
+    if (
+      !rows.some(
+        (row) => row.name === "eyes" && row.users.includes(ownerSlackUserId),
+      )
+    )
+      rows.push({ name: "eyes", users: [ownerSlackUserId] });
+    reactions.set(messageTs, rows);
+  };
+  const route = async (event = root) => {
+    const result = await routeSlackThreadEvent(event, config, fetcher);
+    if (
+      event.operation !== "cancel" &&
+      (result.action === "created" || result.action === "comment_persisted")
+    )
+      seedAgentReaction(event.messageTs);
+    return result;
+  };
   return {
     config,
     route,
@@ -170,7 +191,7 @@ describe("取消和恢复", () => {
     f.reactions
       .get(root.messageTs)!
       .push(
-        { name: "thinking_face", users: ["U1", "U2"] },
+        { name: "thinking_face", users: [ownerSlackUserId, "U2"] },
         { name: "heart", users: ["U2"] },
       );
     expect((await f.route(cancel)).action).toBe("cancelled");
@@ -197,7 +218,7 @@ describe("取消和恢复", () => {
     expect(
       [...f.reactions.values()]
         .flat()
-        .every((row) => !row.users.includes("U1")),
+        .every((row) => !row.users.includes(ownerSlackUserId)),
     ).toBe(true);
   });
   it.each(["completed", "failed", "cancelled"])(
@@ -208,7 +229,9 @@ describe("取消和恢复", () => {
       f.runs[0]!.status = status;
       expect((await f.route(cancel)).action).toBe("no_active_run");
       expect(f.cancelPosts()).toHaveLength(0);
-      expect(f.reactions.get(root.messageTs)![0]!.users).toContain("U1");
+      expect(f.reactions.get(root.messageTs)![0]!.users).toContain(
+        ownerSlackUserId,
+      );
     },
   );
   it("取消时自然完成不伪装取消成功，也不清理完成标记", async () => {
@@ -216,14 +239,18 @@ describe("取消和恢复", () => {
     await f.route();
     f.finishNaturally();
     expect((await f.route(cancel)).action).toBe("no_active_run");
-    expect(f.reactions.get(root.messageTs)![0]!.users).toContain("U1");
+    expect(f.reactions.get(root.messageTs)![0]!.users).toContain(
+      ownerSlackUserId,
+    );
   });
   it("取消响应丢失后先回读，不重复提交取消", async () => {
     const f = fixture();
     await f.route();
     f.loseCancel();
     await expect(f.route(cancel)).rejects.toThrow("lost cancel");
-    expect(f.reactions.get(root.messageTs)![0]!.users).toContain("U1");
+    expect(f.reactions.get(root.messageTs)![0]!.users).toContain(
+      ownerSlackUserId,
+    );
     expect((await f.route(cancel)).action).toBe("cancelled");
     expect(f.cancelPosts()).toHaveLength(1);
   });
@@ -232,7 +259,9 @@ describe("取消和恢复", () => {
     await f.route();
     f.delayCancel();
     await expect(f.route(cancel)).rejects.toThrow("cancellation_pending");
-    expect(f.reactions.get(root.messageTs)![0]!.users).toContain("U1");
+    expect(f.reactions.get(root.messageTs)![0]!.users).toContain(
+      ownerSlackUserId,
+    );
     f.runs[0]!.status = "cancelled";
     expect((await f.route(cancel)).action).toBe("cancelled");
   });
@@ -340,8 +369,12 @@ describe("取消和恢复", () => {
     await f.route({ ...root, messageTs: "101.000001" });
     f.config.store = new MemoryThreadStore();
     expect((await f.route(cancel)).action).toBe("cancelled");
-    expect(f.reactions.get(root.messageTs)![0]!.users).not.toContain("U1");
-    expect(f.reactions.get("101.000001")![0]!.users).not.toContain("U1");
+    expect(f.reactions.get(root.messageTs)![0]!.users).not.toContain(
+      ownerSlackUserId,
+    );
+    expect(f.reactions.get("101.000001")![0]!.users).not.toContain(
+      ownerSlackUserId,
+    );
   });
   it("issue 指派改变后不取消其他 Agent 的任务", async () => {
     const f = fixture();
@@ -367,7 +400,9 @@ describe("取消和恢复", () => {
     f.failCleanup(false);
     await expect(f.route(cancel)).rejects.toThrow("cancellation_new_run");
     expect(f.cancelPosts()).toHaveLength(1);
-    expect(f.reactions.get(root.messageTs)![0]!.users).toContain("U1");
+    expect(f.reactions.get(root.messageTs)![0]!.users).toContain(
+      ownerSlackUserId,
+    );
   });
   it("未知运行状态保留错误，不能推断为已完成", async () => {
     const f = fixture();
@@ -383,7 +418,9 @@ describe("取消和恢复", () => {
     await expect(f.route(cancel)).rejects.toThrow();
     f.runs.splice(0);
     await expect(f.route(cancel)).rejects.toThrow("cancellation_run_missing");
-    expect(f.reactions.get(root.messageTs)![0]!.users).toContain("U1");
+    expect(f.reactions.get(root.messageTs)![0]!.users).toContain(
+      ownerSlackUserId,
+    );
   });
 });
 
@@ -424,7 +461,7 @@ describe("Agent 与 Team 归属的取消兼容", () => {
     await expect(f.route(cancel)).rejects.toThrow("cancellation_new_run");
     expect(f.cancelPosts()).toHaveLength(2);
     expect(f.runs.map((run) => run.status)).toEqual(["cancelled", "cancelled", "running"]);
-    expect(f.reactions.get(root.messageTs)![0]!.users).toContain("U1");
+    expect(f.reactions.get(root.messageTs)![0]!.users).toContain(ownerSlackUserId);
   });
 
   it("Team 正常取消后清理标记，重复取消不重复发送", async () => {
@@ -437,7 +474,7 @@ describe("Agent 与 Team 归属的取消兼容", () => {
     f.newRun("member-run").agent_id = "member";
     expect((await f.route(cancel)).action).toBe("cancelled");
     expect(f.cancelPosts()).toHaveLength(2);
-    expect(f.reactions.get(root.messageTs)![0]!.users).not.toContain("U1");
+    expect(f.reactions.get(root.messageTs)![0]!.users).not.toContain(ownerSlackUserId);
     const count = f.calls.length;
     expect((await f.route(cancel)).action).toBe("cancelled");
     expect(f.calls).toHaveLength(count);

@@ -4,7 +4,7 @@
 
 ## 适用范围
 
-Relay 的事件准入、投递、任务映射与恢复是通用能力。本文配套的 [AGENT-PROMPT.md](AGENT-PROMPT.md) 和 [multica-final-reply](multica-skills/multica-final-reply/SKILL.md) 是 `Slack Task Router (Codex)` 的专属配置；其中的意图判断、静默、原 thread 回复及发布/部署限制不自动适用于其他智能体或小队。
+本 fork 在上游通用事件链路上保留 Rica 的 PR Review 个性化。[AGENT-PROMPT.md](AGENT-PROMPT.md) 是现有 Review Agent 的指令源；[BUG-RESOLVER-PROMPT.md](BUG-RESOLVER-PROMPT.md) 是独立 Bug Resolver 的候选指令。上游 `multica-final-reply` 和可靠回复 adapter 保留为可选能力，不自动替换个人回复流程。接入状态和剩余工作见 [Bug Resolver 准备记录](docs/bug-resolver-readiness.md)。
 
 新智能体按自己的任务目标配置独立 instructions、Skills、结果接收位置与操作权限。即使输入是 Slack thread 链接，或复用同一 Relay、工作区、Runtime，也不默认采用 Router 的配置。维护时先按 [AGENTS.md](AGENTS.md) 确认当前目标。
 
@@ -12,9 +12,11 @@ Relay 的事件准入、投递、任务映射与恢复是通用能力。本文�
 
 `Slack → 签名与准入校验 → QStash 持久化 → HTTP 200 → 消费函数 → Multica Issue → Agent/Runtime → Slack 回复`
 
-- 只处理当前消息明确 mention 的事件。Team 必填；频道和发送者支持白名单（可设为 `all`）及黑名单，黑名单优先。Bot、编辑/删除、普通讨论不触发。
+- 默认处理当前 message 明确 mention 的真人事件，唯一 Bot 例外是完整配置的可信发布候选。Team 必填；频道须显式配置（可设 `all`），普通 mention 的频道/发送者黑名单优先；可信发布候选使用专用 channel/app/bot 配置及频道黑名单，不走普通发送者 allowlist/blocklist。编辑/删除和普通讨论不触发。
+- Review owner 只 @目标组、未直接 @自己时，入队与消费均静默过滤；他人 @组、owner 直接 @自己及可信发布候选不受此门槛影响。
 - 入站只等待 QStash 接收；队列负责后台投递及3次重试，耗尽后在其失败队列查看/重放。
-- 每个 Slack thread 通过普通 Issue API 创建独立任务卡，不经过 Autopilot 同标题60秒去重。
+- 普通 Slack thread 通过 Issue API 建卡；可信发布候选按版本 PR URL 汇聚重复通知，均不经过 Autopilot 同标题60秒去重。
+- Relay 不添加接单 reaction。Review Agent 核实来源、意图及 PR 后尝试加 eyes；表情失败不阻断审查。取消仅清理同一 Rica User 的表情。发布候选仅对精确来源的版本 PR 核验元数据并批准，不审业务 diff、不合并或发布。
 - thread scope 包含 Workspace、Project、稳定的路由标识；默认不同 Agent/Team 不采用彼此的映射。
 - 同 thread 后续消息追加评论。QStash 按 thread 限并发，Redis 锁与消息状态处理重投。
 - 标题使用消息摘要与稳定的线程短标识；描述和后续评论分为原文引用、来源及 JSON 上下文，附件仅保留定位字段。
@@ -24,6 +26,8 @@ Relay 的事件准入、投递、任务映射与恢复是通用能力。本文�
 - Slack Task Router 的 Prompt 真源为 [AGENT-PROMPT.md](AGENT-PROMPT.md)，需要明确同步到该 Agent 的 instructions；其他智能体维护自己的 Prompt。Relay 不调用 Codex 或修改 Multica 源码。
 
 ## 本地验证
+
+使用 Node >=22.12；本机验证使用 Node 24.18.0 和仓库声明的 pnpm 10.34.5。默认 Node 18 无法运行该版本 Corepack/pnpm。
 
 ```bash
 pnpm install --frozen-lockfile
@@ -70,7 +74,7 @@ Team 模式不将旧 Agent 的配置快照当作实际执行模型：relay 的 `
 
 取消指令复用现有消息订阅，经 QStash 持久化处理，不会建卡、追加任务评论或添加启动 reaction。消费者保存目标运行 ID，取消排队或执行中的运行并回读状态，然后清理已记录触发消息上当前 reaction token 身份的全部 reaction（包括启动标记）；其他人的 reaction 保留。已完成、已失败且没有活动运行时保留原标记。
 
-取消期间的任务请求会被忽略。取消完成后重新发送 mention 可继续原任务卡；已处理的旧事件不会重新启动任务。API 或清理失败保留进度，由 QStash 重试；重试耗尽需检查 DLQ 并重放原消息。所有 reaction 操作优先使用 `SLACK_BOT_TOKEN`，未配置时使用 `SLACK_USER_TOKEN`；选中的 token 需要 `reactions:read`、`reactions:write` 且能访问目标频道，调用失败不会切换身份。切换身份后，旧身份添加的表情会保留。无需订阅 `reaction_added`。
+取消期间的任务请求会被忽略。取消完成后重新发送 mention 可继续原任务卡；已处理的旧事件不会重新启动任务。API 或清理失败保留进度，由 QStash 重试；重试耗尽需检查 DLQ 并重放原消息。Review reaction 由 Agent 使用 Rica User 添加，Relay 取消清理仅使用 `SLACK_USER_TOKEN`；两者须对应同一 User。Bot token 不参与这条路径。取消读取与清理所需权限按 Slack 当前 API 配置，其他身份的表情保留。无需订阅 `reaction_added`。
 
 ## 可靠交付与可选发送适配器
 

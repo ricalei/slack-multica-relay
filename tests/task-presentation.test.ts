@@ -17,6 +17,22 @@ const event: SlackThreadEvent = {
   mention: { type: "subteam", id: "S1" },
 };
 const marker = "<!-- relay-thread:scope:thread -->";
+const releaseEvent: SlackThreadEvent = {
+  taskType: "release_approval",
+  teamId: "T1",
+  channelId: "C08HV4GTJ2D",
+  threadTs: "1789637508.526609",
+  messageTs: "1789637508.526609",
+  senderUserId: "U081137G64T",
+  text: "RELEASE APPROVAL REQUIRED",
+  operation: "dispatch",
+  releaseApproval: {
+    version: "v1.0.117",
+    prUrl: "https://github.com/MoeGolibrary/moego-finance-kit/pull/354",
+    sourceAppId: "A080YA0KTJ9",
+    sourceBotId: "B081PVALKC0",
+  },
+};
 
 describe("task presentation", () => {
   it("keeps Relay reply context separate from user-controlled event fields", () => {
@@ -48,6 +64,53 @@ describe("task presentation", () => {
       formatTaskTitle({ ...event, threadTs: "1788750612.844939" }, "scope"),
     ).not.toBe(title);
     expect(formatTaskTitle(event, "other")).not.toBe(title);
+  });
+  it("uses the version PR identity for release task titles", () => {
+    const title = formatTaskTitle(releaseEvent, "scope");
+    expect(title).toMatch(
+      /^发布候选自动批准 · moego-finance-kit #354 · v1\.0\.117 · \[[a-f0-9]{16}\]$/,
+    );
+    expect(
+      formatTaskTitle(
+        {
+          ...releaseEvent,
+          messageTs: "1789637600.000001",
+          threadTs: "1789637600.000001",
+        },
+        "scope",
+      ),
+    ).toBe(title);
+    expect(
+      formatTaskTitle(
+        {
+          ...releaseEvent,
+          releaseApproval: {
+            ...releaseEvent.releaseApproval,
+            prUrl:
+              "https://github.com/MoeGolibrary/moego-finance-kit/pull/355",
+          },
+        },
+        "scope",
+      ),
+    ).not.toBe(title);
+  });
+  it("serializes only explicit release approval metadata", () => {
+    const description = formatTaskDescription(
+      {
+        ...releaseEvent,
+        releaseApproval: {
+          ...releaseEvent.releaseApproval,
+          ignored: "untrusted",
+        },
+      } as SlackThreadEvent,
+      marker,
+    );
+    const payload = JSON.parse(
+      description.match(/```json\n([\s\S]*?)\n```/)![1]!,
+    ).eventPayload;
+    expect(payload).toMatchObject(releaseEvent);
+    expect(payload).not.toHaveProperty("mention");
+    expect(payload.releaseApproval).not.toHaveProperty("ignored");
   });
   it("falls back to the PR reference or a generic label and bounds long summaries", () => {
     expect(
@@ -124,6 +187,17 @@ describe("task presentation", () => {
         ),
       ).toThrow("invalid_thread_state");
     }
+  });
+  it("rejects a release payload whose trusted approval identity is missing", () => {
+    const description = formatTaskDescription(releaseEvent, marker);
+    expect(() =>
+      readTaskMessage(
+        description.replace(
+          '"releaseApproval": {',
+          '"releaseApprovalMissing": {',
+        ),
+      ),
+    ).toThrow("invalid_thread_state");
   });
   it("rejects incomplete, duplicated or malformed versioned blocks without legacy fallback", () => {
     const description = formatTaskDescription(event, marker);
