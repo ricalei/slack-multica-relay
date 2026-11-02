@@ -14,6 +14,22 @@ const root: SlackThreadEvent = {
   text: "<@U1> test",
   mention: { type: "user", id: "U1" },
 };
+const releaseRoot: SlackThreadEvent = {
+  taskType: "release_approval",
+  teamId: "T1",
+  channelId: "C08HV4GTJ2D",
+  messageTs: "1789637508.526609",
+  threadTs: "1789637508.526609",
+  senderUserId: "U081137G64T",
+  text: "RELEASE APPROVAL REQUIRED VERSION v1.0.117 STATUS WAITING FOR APPROVAL",
+  operation: "dispatch",
+  releaseApproval: {
+    version: "v1.0.117",
+    prUrl: "https://github.com/MoeGolibrary/moego-finance-kit/pull/354",
+    sourceAppId: "A080YA0KTJ9",
+    sourceBotId: "B081PVALKC0",
+  },
+};
 function fixture() {
   const issues: {
     id: string;
@@ -24,6 +40,7 @@ function fixture() {
     assignee_id: string;
   }[] = [];
   const comments: { id: string; content: string }[] = [];
+  const slackReactionCalls: string[] = [];
   let issuePosts = 0,
     agentGets = 0,
     commentPosts = 0,
@@ -72,6 +89,10 @@ function fixture() {
     }
     const mapped = issues.find((row) => url.endsWith("/api/issues/" + row.id));
     if (mapped) return Response.json(mapped);
+    if (url === "https://slack.com/api/reactions.add") {
+      slackReactionCalls.push(String(init?.body));
+      return Response.json({ ok: true });
+    }
     throw new Error("unexpected endpoint");
   };
   const config: ThreadRouterConfig = {
@@ -87,6 +108,7 @@ function fixture() {
     fetcher,
     issues,
     comments,
+    slackReactionCalls,
     agentConfig,
     get agentGets() {
       return agentGets;
@@ -187,6 +209,55 @@ describe("direct Issue routing", () => {
     expect(f.issuePosts).toBe(2);
     expect(f.issues[0]!.title).not.toBe(f.issues[1]!.title);
   });
+  it("routes separate notifications for the same version PR to one Issue", async () => {
+    const f = fixture();
+    await routeSlackThreadEvent(releaseRoot, f.config, f.fetcher);
+    const repeated = {
+      ...releaseRoot,
+      messageTs: "1789637600.000001",
+      threadTs: "1789637600.000001",
+    };
+    expect(
+      (await routeSlackThreadEvent(repeated, f.config, f.fetcher)).action,
+    ).toBe("comment_persisted");
+    expect(f.issuePosts).toBe(1);
+    expect(f.commentPosts).toBe(1);
+  });
+  it("recovers the same version PR Issue after its KV mapping expires", async () => {
+    const f = fixture();
+    await routeSlackThreadEvent(releaseRoot, f.config, f.fetcher);
+    f.config.store = new MemoryThreadStore();
+    const repeated = {
+      ...releaseRoot,
+      messageTs: "1789637600.000001",
+      threadTs: "1789637600.000001",
+    };
+    expect(
+      (await routeSlackThreadEvent(repeated, f.config, f.fetcher)).action,
+    ).toBe("comment_persisted");
+    expect(f.issuePosts).toBe(1);
+    expect(f.commentPosts).toBe(1);
+  });
+  it("routes different version PRs to distinct Issues", async () => {
+    const f = fixture();
+    await routeSlackThreadEvent(releaseRoot, f.config, f.fetcher);
+    await routeSlackThreadEvent(
+      {
+        ...releaseRoot,
+        messageTs: "1789637600.000001",
+        threadTs: "1789637600.000001",
+        releaseApproval: {
+          ...releaseRoot.releaseApproval,
+          version: "v1.0.118",
+          prUrl: "https://github.com/MoeGolibrary/moego-finance-kit/pull/355",
+        },
+      },
+      f.config,
+      f.fetcher,
+    );
+    expect(f.issuePosts).toBe(2);
+    expect(f.issues[0]!.title).not.toBe(f.issues[1]!.title);
+  });
   it("one thread creates once and appends once per followup", async () => {
     const f = fixture();
     await routeSlackThreadEvent(root, f.config, f.fetcher);
@@ -199,6 +270,31 @@ describe("direct Issue routing", () => {
     expect(f.issuePosts).toBe(1);
     expect(f.agentGets).toBe(2);
     expect(f.commentPosts).toBe(1);
+  });
+  it("never adds Slack reactions for created, duplicate, or followup delivery", async () => {
+    const f = fixture();
+    const legacyReactionConfig = Object.assign(f.config, {
+      slackReactionToken: "xoxp-owner",
+      slackReactionName: "eyes",
+    });
+    expect(
+      (await routeSlackThreadEvent(root, legacyReactionConfig, f.fetcher))
+        .action,
+    ).toBe("created");
+    expect(
+      (await routeSlackThreadEvent(root, legacyReactionConfig, f.fetcher))
+        .action,
+    ).toBe("duplicate");
+    expect(
+      (
+        await routeSlackThreadEvent(
+          { ...root, messageTs: "102.000001" },
+          legacyReactionConfig,
+          f.fetcher,
+        )
+      ).action,
+    ).toBe("comment_persisted");
+    expect(f.slackReactionCalls).toEqual([]);
   });
   it("recovers a committed Issue after lost response without second POST", async () => {
     const f = fixture();
@@ -383,23 +479,5 @@ describe("Team migration", () => {
     expect(f.issues[0]).toMatchObject({ assignee_type: "squad", assignee_id: "team" });
     await routeSlackThreadEvent(root, { ...config, multicaAssigneeId: "another" }, f.fetcher);
     expect(f.issuePosts).toBe(2);
-  });
-});
-
-
-describe("投递成功后的 reaction 诊断", () => {
-  it("表情失败不影响建卡，并只记录允许的诊断字段", async () => {
-    const f = fixture();
-    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
-    f.config.slackReactionToken = "test-token";
-    f.config.slackReactionName = "eyes";
-    const fetcher: typeof fetch = (input, init) => String(input).endsWith("/reactions.add")
-      ? Promise.resolve(Response.json({ ok: false, error: "missing_scope", detail: "private-response" }))
-      : f.fetcher(input, init);
-    expect((await routeSlackThreadEvent(root, f.config, fetcher)).action).toBe("created");
-    expect(warning).toHaveBeenCalledWith("relay_reaction", {
-      eventId: expect.any(String), reason: "reaction_failed", errorCode: "missing_scope", httpStatus: 200,
-    });
-    expect(JSON.stringify(warning.mock.calls)).not.toContain("private-response");
   });
 });
