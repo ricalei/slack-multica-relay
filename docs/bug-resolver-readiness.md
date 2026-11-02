@@ -181,4 +181,6 @@ Prompt 属于行为约束，不是程序硬门禁。Relay 没有业务浏览器�
 
 Rica 要求撤回 Ego 覆盖，Resolver 浏览器验收恢复 moe-acceptance 默认 agent-browser；保留实际页面、账号／商家、源码版本、资格与 checkpoint 约束。仅调整后续运行指令，不触发业务验收、关闭现存现场或恢复已删除的跟进任务。
 
-账号选择新增可选 MOE_ACCEPTANCE_ACCOUNT_CATALOG：由本机外置配置指向只读 Markdown 目录／知识库导航，已有合格身份优先复用；首次选择先查目录、匹配并核验资格，再回退默认邮箱及其它来源。目录不可用须说明具体缺口。共享 Skill 只维护通用读取合同，个人知识库路径和账号／凭据不进入仓库或线上 Prompt。源码候选分别位于本仓库及 moego-ai-plugin，线上同步与安装仍须先完成各自 PR 流程。
+账号选择新增可选 MOE_ACCEPTANCE_ACCOUNT_CATALOG：由本机外置配置指向只读 Markdown 目录／知识库导航，已有合格身份优先复用；首次选择先查目录、匹配并核验资格，再回退默认邮箱及其它来源。目录不可用须说明具体缺口。共享 Skill 只维护通用读取合同，个人知识库路径和账号／凭据不进入仓库或线上 Prompt。共享 Skill 变更已进入 https://github.com/MoeGolibrary/moego-ai-plugin/pull/208（0212646），本仓库改动进入 PR #1（23ccd39）。已通过 Skills CLI 安装 moe-acceptance 2.1.0，100 个受跟踪文件逐项比对一致；线上 Resolver instructions 已逐字回读一致，model 保持 gpt-6-luna，并发上限保持当前值 3。
+
+本机验证：相对最新 origin/main 的 Repository Check 通过，受影响 Skill 的 9 项 Node 测试、317 项 Python 测试及其它确定性检查通过。实际新业务任务、旧 FBD-19 报告改写及支付场景复验未执行；本轮没有恢复已删除的跟进任务。新版本支持四项结构化摘要，但旧报告不会自动迁移。独立验收 Python 环境、SimRun 与 sim-use 的完整可用性仍待准备和验证。
