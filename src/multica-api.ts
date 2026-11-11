@@ -2,6 +2,7 @@ export interface MulticaIssue {
   id: string;
   title: string;
   description?: string | null;
+  status?: string;
   project_id?: string | null;
   assignee_id?: string | null;
   assignee_type?: string | null;
@@ -318,6 +319,23 @@ export async function getIssue(
   )
     throw new Error("invalid_issue_scope");
   return result;
+}
+export async function updateIssueStatus(
+  config: ApiConfig,
+  issueId: string,
+  status: "done",
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  const response = await api(
+    config,
+    `/api/issues/${encodeURIComponent(issueId)}`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ status, suppress_run: true }),
+    },
+    fetchImpl,
+  );
+  if (!response.ok) throw new ApiError(response.status);
 }
 export async function listIssueRuns(
   config: ApiConfig,

@@ -8,17 +8,19 @@ import {
   createComment,
   findComment,
   getSlackReplyContext,
+  getIssue,
   type ApiConfig,
   type SlackReplyContext,
 } from "./multica-api.js";
 import type { MentionMatch } from "./mentions.js";
-import { addSlackReaction, reactionErrorDetails } from "./reaction.js";
+import type { ReleaseApprovalMatch } from "./release-approval.js";
 import {
   cancelThread,
   compareTimestamp,
   maxTimestamp,
   type CancellationState,
 } from "./cancellation.js";
+import { addSlackEyes } from "./reaction.js";
 import { type ThreadStore } from "./thread-store.js";
 import {
   formatTaskTitle,
@@ -27,22 +29,34 @@ import {
   compactEvent,
 } from "./task-presentation.js";
 
-export interface SlackThreadEvent {
+interface SlackEventBase {
+  routeId?: "review" | "bug";
+  routeTarget?: string;
   teamId: string;
   channelId: string;
   messageTs: string;
   threadTs: string;
   senderUserId: string;
   text: string;
-  mention: MentionMatch;
   files?: unknown;
   filesTruncated?: boolean;
+}
+export interface SlackMentionEvent extends SlackEventBase {
+  taskType?: "mention_review" | "bug_resolver";
+  mention: MentionMatch;
   operation?: "dispatch" | "cancel";
 }
+export interface SlackReleaseApprovalEvent extends SlackEventBase {
+  taskType: "release_approval";
+  releaseApproval: ReleaseApprovalMatch;
+  operation: "dispatch";
+}
+export type SlackThreadEvent = SlackMentionEvent | SlackReleaseApprovalEvent;
 export interface ThreadRouterConfig extends ApiConfig {
   store: ThreadStore;
   slackReactionToken?: string;
-  slackReactionName?: string;
+  slackBotUserId?: string;
+  ownerSlackUserId?: string;
 }
 export interface ThreadState {
   version: 2;
@@ -69,7 +83,17 @@ export interface ThreadRouteResult {
   issueId?: string;
 }
 export const STATE_TTL_SECONDS = 90 * 24 * 60 * 60;
-export function threadKey(event: SlackThreadEvent): string {
+export function threadKey(event: {
+  teamId: string;
+  channelId: string;
+  threadTs: string;
+  taskType?: string;
+  releaseApproval?: { prUrl: string };
+}): string {
+  if (event.taskType === "release_approval") {
+    if (!event.releaseApproval?.prUrl) throw new Error("invalid_thread_state");
+    return `${event.teamId}:${event.channelId}:release_approval:${event.releaseApproval.prUrl}`;
+  }
   return `${event.teamId}:${event.channelId}:${event.threadTs}`;
 }
 export function messageKey(event: SlackThreadEvent): string {
@@ -117,8 +141,36 @@ export async function routeSlackThreadEvent(
     const marker = `<!-- relay-thread:${scope}:${digest(threadKey(event))} -->`;
     const save = () =>
       config.store.set(key, JSON.stringify(state), STATE_TTL_SECONDS);
-    if (event.operation === "cancel")
+    if (event.operation === "cancel") {
+      // Bug cancellation belongs to the original requester or the configured owner,
+      // never to the mentioned Bot. Check before writing cancellation/ignored state.
+      if (event.routeId === "bug" && event.senderUserId !== config.ownerSlackUserId) {
+        const issue = state.issueId
+          ? await getIssue(config, state.issueId, fetchImpl)
+          : await findIssue(config, marker, fetchImpl);
+        let requester: string | undefined;
+        if (issue) {
+          if (!issue.description?.startsWith(marker + "\n")) throw new Error("invalid_issue_scope");
+          requester = readTaskMessage(issue.description).senderUserId;
+        } else {
+          if (!state.creating) return { action: "ignored" };
+          // The root envelope was frozen before POST. It proves ownership even
+          // while a committed Issue is not yet discoverable, so cancellation
+          // can persist its intent before later follow-ups reach the thread.
+          const frozen = await config.store.get(`relay:${scope}:message:${digest(state.rootMessageKey)}:envelope`);
+          if (!frozen) throw new Error("cancellation_pending");
+          const original = JSON.parse(frozen)?.eventPayload;
+          if (!original || original.routeId !== "bug" ||
+            original.teamId !== event.teamId || original.channelId !== event.channelId ||
+            original.threadTs !== event.threadTs || messageKey(original) !== state.rootMessageKey ||
+            typeof original.senderUserId !== "string") throw new Error("invalid_thread_state");
+          requester = original.senderUserId;
+        }
+        if (requester !== event.senderUserId)
+          return { action: "ignored", issueId: issue?.id };
+      }
       return await cancelThread(event, state, marker, config, save, fetchImpl);
+    }
     if (state.cancellation && state.cancellation.phase !== "done") {
       state.ignoredThrough = maxTimestamp(
         state.ignoredThrough,
@@ -144,22 +196,14 @@ export async function routeSlackThreadEvent(
     const finish = async (
       action: "created" | "comment_persisted" | "duplicate",
     ): Promise<ThreadRouteResult> => {
-      // 添加和取消清理共用线程锁，避免迟到的启动 reaction 出现在已取消任务上。
-      if (config.slackReactionToken && config.slackReactionName) {
+      if (event.routeId === "bug" && action !== "duplicate") {
         try {
-          await addSlackReaction(
-            config.slackReactionToken,
-            event.channelId,
-            event.messageTs,
-            config.slackReactionName,
-            fetchImpl,
-          );
-        } catch (error) {
-          console.warn("relay_reaction", {
-            eventId: digest(messageKey(event)),
-            reason: "reaction_failed",
-            ...reactionErrorDetails(error),
-          });
+          if (!config.slackReactionToken || !config.slackBotUserId) throw new Error("missing_bot_identity");
+          await addSlackEyes(config.slackReactionToken, event.teamId, config.slackBotUserId,
+            event.channelId, event.messageTs, fetchImpl);
+        } catch {
+          // Receipt is best effort. Never retry completed task delivery for a reaction failure.
+          console.warn("relay_bug_receipt", { eventId: digest(messageKey(event)), reason: "eyes_failed" });
         }
       }
       return { action, issueId: state.issueId };
@@ -185,10 +229,7 @@ export async function routeSlackThreadEvent(
         state.issueId = existing.id;
         if (!raw) {
           const original = readTaskMessage(existing.description!);
-          if (
-            `${original.teamId}:${original.channelId}:${original.threadTs}` !==
-            threadKey(event)
-          )
+          if (threadKey(original) !== threadKey(event))
             throw new Error("invalid_thread_state");
           state.rootMessageKey = `${original.teamId}:${original.channelId}:${original.messageTs}`;
           if (!state.reactionMessages!.includes(original.messageTs))

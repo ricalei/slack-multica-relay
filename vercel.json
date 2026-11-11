@@ -6,6 +6,9 @@
     },
     "api/queue/consume.ts": {
       "maxDuration": 60
+    },
+    "api/multica/ignore.ts": {
+      "maxDuration": 10
     }
   }
 }

@@ -6,7 +6,7 @@ import { createTestHarness } from 'wrangler';
 // Inline config uses the production entry/compatibility settings without loading private dotenv files.
 const config = JSON.parse(readFileSync('wrangler.jsonc', 'utf8'));
 const env = {
-  SLACK_SIGNING_SECRET: 'test-signing', SLACK_TEAM_ID: 'T1', SLACK_TARGET_USER_IDS: 'U1',
+  SLACK_SIGNING_SECRET: 'test-signing', SLACK_TEAM_ID: 'T1', RELAY_OWNER_SLACK_USER_ID: 'U1', SLACK_TARGET_USER_IDS: 'U1',
   SLACK_ALLOWED_CHANNEL_IDS: 'C1', SLACK_USER_TOKEN: 'test',
   SLACK_REACTION_NAME: 'eyes', MULTICA_API_BASE_URL: 'https://multica.invalid', MULTICA_API_TOKEN: 'test',
   MULTICA_WORKSPACE_ID: 'W1', MULTICA_PROJECT_ID: 'P1', MULTICA_AGENT_ID: 'A1',
